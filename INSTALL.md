@@ -673,20 +673,36 @@ app_token = "xapp-xxx"
 cc-connect --version
 ```
 
+### Self-update (recommended)
+
+cc-connect can update itself in place. Pick the channel that fits how stable
+you want the build to be:
+
+```bash
+# Latest tagged stable release (default)
+cc-connect update
+
+# Latest pre-release (alpha/beta/rc)
+cc-connect update --pre
+
+# Latest rolling build from the main branch (bleeding edge, unstable)
+cc-connect update --channel main
+
+# Pin to a specific tagged version
+cc-connect update --version v1.2.0
+```
+
+The `--channel main` builds are produced by CI on every passing push to
+`main` and tagged as a single rolling pre-release. They are intended for
+testing — expect breakage.
+
+`--version` accepts either `v1.2.3` or `1.2.3`. The flag is mutually
+exclusive with `--channel main` and `--pre`.
+
 ### npm users
 
 ```bash
 npm update -g cc-connect
-```
-
-### Binary users
-
-Check the latest release at https://github.com/chenhg5/cc-connect/releases and compare with your local version. To upgrade:
-
-```bash
-# Linux/macOS — replace with your platform suffix
-curl -L -o /usr/local/bin/cc-connect https://github.com/chenhg5/cc-connect/releases/latest/download/cc-connect-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/')
-chmod +x /usr/local/bin/cc-connect
 ```
 
 ### Source users
@@ -697,7 +713,8 @@ git pull
 make build
 ```
 
-After upgrading, restart the running cc-connect process.
+After upgrading, restart the running cc-connect process. If you installed
+the daemon, run `cc-connect daemon restart` to pick up the new binary.
 
 ## Step 8: Run as Background Service (Optional)
 

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -142,6 +143,261 @@ func TestSyncNpmPackageVersion_NormalizesVPrefix(t *testing.T) {
 	// Version should still be "v1.0.0" (not overwritten with "1.0.0")
 	if pkg["version"] != "v1.0.0" {
 		t.Errorf("version = %v, want v1.0.0 (unchanged)", pkg["version"])
+	}
+}
+
+func TestNormalizeVersionTag(t *testing.T) {
+	tests := []struct {
+		in, want string
+	}{
+		{"", ""},
+		{"v1.2.3", "v1.2.3"},
+		{"1.2.3", "v1.2.3"},
+		{"  1.2.3  ", "v1.2.3"},
+		{"v1.2.3-beta.1", "v1.2.3-beta.1"},
+		{"main", "main"},
+		{"main-abc1234", "main-abc1234"},
+	}
+	for _, tt := range tests {
+		got := normalizeVersionTag(tt.in)
+		if got != tt.want {
+			t.Errorf("normalizeVersionTag(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestParseUpdateArgs(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      []string
+		wantErr   bool
+		wantOpts  updateOpts
+		errSubstr string
+	}{
+		{
+			name:     "no args defaults to stable",
+			args:     nil,
+			wantOpts: updateOpts{channel: "stable"},
+		},
+		{
+			name:     "pre flag",
+			args:     []string{"--pre"},
+			wantOpts: updateOpts{channel: "stable", pre: true},
+		},
+		{
+			name:     "beta is alias for pre",
+			args:     []string{"--beta"},
+			wantOpts: updateOpts{channel: "stable", pre: true},
+		},
+		{
+			name:     "channel main",
+			args:     []string{"--channel", "main"},
+			wantOpts: updateOpts{channel: "main"},
+		},
+		{
+			name:     "version pin normalizes leading v",
+			args:     []string{"--version", "1.2.3"},
+			wantOpts: updateOpts{channel: "stable", pinVersion: "v1.2.3"},
+		},
+		{
+			name:     "version pin with leading v unchanged",
+			args:     []string{"--version", "v1.2.3"},
+			wantOpts: updateOpts{channel: "stable", pinVersion: "v1.2.3"},
+		},
+		{
+			name:      "version + channel main is rejected",
+			args:      []string{"--version", "v1.2.3", "--channel", "main"},
+			wantErr:   true,
+			errSubstr: "mutually exclusive",
+		},
+		{
+			name:      "version + pre is rejected",
+			args:      []string{"--version", "v1.2.3", "--pre"},
+			wantErr:   true,
+			errSubstr: "mutually exclusive",
+		},
+		{
+			name:      "channel main + pre is rejected",
+			args:      []string{"--channel", "main", "--pre"},
+			wantErr:   true,
+			errSubstr: "mutually exclusive",
+		},
+		{
+			name:      "unknown channel rejected",
+			args:      []string{"--channel", "nightly"},
+			wantErr:   true,
+			errSubstr: "unknown --channel",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseUpdateArgs(tt.args)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("parseUpdateArgs(%v) = no error, want error", tt.args)
+				}
+				if tt.errSubstr != "" && !strings.Contains(err.Error(), tt.errSubstr) {
+					t.Errorf("error %q does not contain %q", err.Error(), tt.errSubstr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseUpdateArgs(%v) unexpected error: %v", tt.args, err)
+			}
+			if got != tt.wantOpts {
+				t.Errorf("parseUpdateArgs(%v) = %+v, want %+v", tt.args, got, tt.wantOpts)
+			}
+		})
+	}
+}
+
+func TestSelectAssetURLs(t *testing.T) {
+	rel := &githubRelease{
+		TagName: "v1.2.3",
+		Assets: []releaseAsset{
+			{Name: "cc-connect-v1.2.3-linux-amd64", BrowserDownloadURL: "https://example/linux-amd64-bin"},
+			{Name: "cc-connect-v1.2.3-linux-amd64.tar.gz", BrowserDownloadURL: "https://example/linux-amd64-tgz"},
+			{Name: "cc-connect-v1.2.3-darwin-arm64", BrowserDownloadURL: "https://example/darwin-arm64-bin"},
+			{Name: "cc-connect-v1.2.3-darwin-arm64.tar.gz", BrowserDownloadURL: "https://example/darwin-arm64-tgz"},
+			{Name: "cc-connect-v1.2.3-windows-amd64.exe", BrowserDownloadURL: "https://example/win-amd64-exe"},
+			{Name: "cc-connect-v1.2.3-windows-amd64.zip", BrowserDownloadURL: "https://example/win-amd64-zip"},
+			{Name: "checksums.txt", BrowserDownloadURL: "https://example/checksums"},
+		},
+	}
+
+	tests := []struct {
+		goos, goarch         string
+		wantBin, wantArchive string
+	}{
+		{"linux", "amd64", "https://example/linux-amd64-bin", "https://example/linux-amd64-tgz"},
+		{"darwin", "arm64", "https://example/darwin-arm64-bin", "https://example/darwin-arm64-tgz"},
+		{"windows", "amd64", "https://example/win-amd64-exe", "https://example/win-amd64-zip"},
+		{"linux", "arm64", "", ""}, // not in this release
+	}
+	for _, tt := range tests {
+		bin, arc := selectAssetURLs(rel, tt.goos, tt.goarch)
+		if bin != tt.wantBin {
+			t.Errorf("selectAssetURLs(%s/%s) bin = %q, want %q", tt.goos, tt.goarch, bin, tt.wantBin)
+		}
+		if arc != tt.wantArchive {
+			t.Errorf("selectAssetURLs(%s/%s) archive = %q, want %q", tt.goos, tt.goarch, arc, tt.wantArchive)
+		}
+	}
+}
+
+func TestSelectAssetURLs_MainChannelShaName(t *testing.T) {
+	// Main channel: tag is "main" but asset names embed the short SHA.
+	rel := &githubRelease{
+		TagName: "main",
+		Name:    "main (rolling, main-abc1234)",
+		Assets: []releaseAsset{
+			{Name: "cc-connect-main-abc1234-linux-amd64.tar.gz", BrowserDownloadURL: "https://example/main-linux"},
+			{Name: "cc-connect-main-abc1234-darwin-arm64.tar.gz", BrowserDownloadURL: "https://example/main-darwin"},
+			{Name: "cc-connect-main-abc1234-windows-amd64.zip", BrowserDownloadURL: "https://example/main-win"},
+		},
+	}
+	_, arc := selectAssetURLs(rel, "darwin", "arm64")
+	if arc != "https://example/main-darwin" {
+		t.Errorf("main-channel darwin/arm64 archive = %q, want main-darwin", arc)
+	}
+}
+
+func TestExtractMainVersionFromAssets(t *testing.T) {
+	tests := []struct {
+		name   string
+		assets []releaseAsset
+		want   string
+	}{
+		{
+			name: "linux asset",
+			assets: []releaseAsset{
+				{Name: "cc-connect-main-abc1234-linux-amd64.tar.gz"},
+			},
+			want: "main-abc1234",
+		},
+		{
+			name: "darwin asset",
+			assets: []releaseAsset{
+				{Name: "cc-connect-main-def5678-darwin-arm64.tar.gz"},
+			},
+			want: "main-def5678",
+		},
+		{
+			name: "windows asset",
+			assets: []releaseAsset{
+				{Name: "cc-connect-main-abcdef0-windows-amd64.zip"},
+			},
+			want: "main-abcdef0",
+		},
+		{
+			name: "no main assets",
+			assets: []releaseAsset{
+				{Name: "cc-connect-v1.2.3-linux-amd64.tar.gz"},
+			},
+			want: "",
+		},
+		{
+			name:   "empty",
+			assets: nil,
+			want:   "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rel := &githubRelease{Assets: tt.assets}
+			got := extractMainVersionFromAssets(rel)
+			if got != tt.want {
+				t.Errorf("extractMainVersionFromAssets() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestReleaseDisplayVersion(t *testing.T) {
+	tests := []struct {
+		name string
+		rel  *githubRelease
+		opts updateOpts
+		want string
+	}{
+		{
+			name: "stable uses tag",
+			rel:  &githubRelease{TagName: "v1.2.3"},
+			opts: updateOpts{channel: "stable"},
+			want: "v1.2.3",
+		},
+		{
+			name: "main prefers asset-derived sha",
+			rel: &githubRelease{
+				TagName: "main",
+				Name:    "main (rolling)",
+				Assets: []releaseAsset{
+					{Name: "cc-connect-main-abc1234-linux-amd64.tar.gz"},
+				},
+			},
+			opts: updateOpts{channel: "main"},
+			want: "main-abc1234",
+		},
+		{
+			name: "main falls back to release name when assets miss",
+			rel:  &githubRelease{TagName: "main", Name: "main-fallback"},
+			opts: updateOpts{channel: "main"},
+			want: "main-fallback",
+		},
+		{
+			name: "main falls back to tag when name and assets both empty",
+			rel:  &githubRelease{TagName: "main"},
+			opts: updateOpts{channel: "main"},
+			want: "main",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := releaseDisplayVersion(tt.rel, tt.opts)
+			if got != tt.want {
+				t.Errorf("releaseDisplayVersion() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
