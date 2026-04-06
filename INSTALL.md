@@ -6,7 +6,7 @@
 
 cc-connect bridges local AI coding assistants to messaging platforms (Feishu, DingTalk, Telegram, Slack, Discord, LINE, WeChat Work, QQ), and — in **beta / pre-release builds only** — **personal WeChat** via the **Weixin (ilink)** platform. Stable releases focus on the first set of platforms; **personal WeChat is not part of the default stable npm binary yet.**
 
-GitHub: https://github.com/chenhg5/cc-connect
+GitHub: https://github.com/Unimountltd/cc-connect
 
 **IMPORTANT: If you are an AI agent helping a user install cc-connect, use interactive tools (like AskUserQuestion) to guide them through configuration choices:**
 - Agent selection (Claude Code, Cursor, Gemini, etc.)
@@ -42,11 +42,11 @@ Verify:
 cc-connect --version
 ```
 
-For binaries, use a **Pre-release** from [GitHub Releases](https://github.com/chenhg5/cc-connect/releases) (tags like `v1.x.x-beta.x`) or your mirror (e.g. Gitee), not only `latest` stable.
+For binaries, use a **Pre-release** from [GitHub Releases](https://github.com/Unimountltd/cc-connect/releases) (tags like `v1.x.x-beta.x`) or your mirror (e.g. Gitee), not only `latest` stable.
 
 ### Option B: Download binary from GitHub Releases
 
-Go to https://github.com/chenhg5/cc-connect/releases and download the binary for your platform.
+Go to https://github.com/Unimountltd/cc-connect/releases and download the binary for your platform.
 
 - **Stable:** use the **Latest** release assets (names may include version, e.g. `cc-connect-vX.Y.Z-linux-amd64`).
 - **Personal WeChat (Weixin):** download a **Pre-release** / beta tag asset — **`latest` stable does not include Weixin** until the feature is promoted.
@@ -59,7 +59,7 @@ Typical artifact names (check the release page for exact filenames):
 
 ```bash
 # Example for Linux amd64 (replace URL with the asset link from the release you chose):
-curl -L -o cc-connect https://github.com/chenhg5/cc-connect/releases/latest/download/cc-connect-linux-amd64
+curl -L -o cc-connect https://github.com/Unimountltd/cc-connect/releases/latest/download/cc-connect-linux-amd64
 chmod +x cc-connect
 sudo mv cc-connect /usr/local/bin/
 ```
@@ -75,7 +75,7 @@ xattr -d com.apple.quarantine cc-connect
 Requires Go 1.22+.
 
 ```bash
-git clone https://github.com/chenhg5/cc-connect.git
+git clone https://github.com/Unimountltd/cc-connect.git
 cd cc-connect
 make build
 # Binary will be at ./cc-connect
