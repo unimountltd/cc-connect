@@ -442,6 +442,66 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 
 var _ core.FileSender = (*Platform)(nil)
 
+// ── Message update & preview (compact progress) ────────────────
+
+type slackPreviewHandle struct {
+	channel   string
+	timestamp string
+}
+
+func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content string) (any, error) {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return nil, fmt.Errorf("slack: SendPreviewStart: invalid reply context type %T", rctx)
+	}
+	channel, ts, err := p.client.PostMessageContext(ctx, rc.channel,
+		slack.MsgOptionText(content, false))
+	if err != nil {
+		return nil, fmt.Errorf("slack: send preview: %w", err)
+	}
+	return &slackPreviewHandle{channel: channel, timestamp: ts}, nil
+}
+
+func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content string) error {
+	h, ok := previewHandle.(*slackPreviewHandle)
+	if !ok {
+		return fmt.Errorf("slack: UpdateMessage: invalid preview handle type %T", previewHandle)
+	}
+	_, _, _, err := p.client.UpdateMessageContext(ctx, h.channel, h.timestamp,
+		slack.MsgOptionText(content, false))
+	if err != nil {
+		if strings.Contains(err.Error(), "message_not_found") {
+			return nil // message was deleted; nothing to update
+		}
+		return fmt.Errorf("slack: update message: %w", err)
+	}
+	return nil
+}
+
+func (p *Platform) DeletePreviewMessage(ctx context.Context, previewHandle any) error {
+	h, ok := previewHandle.(*slackPreviewHandle)
+	if !ok {
+		return fmt.Errorf("slack: DeletePreviewMessage: invalid preview handle type %T", previewHandle)
+	}
+	_, _, err := p.client.DeleteMessageContext(ctx, h.channel, h.timestamp)
+	if err != nil {
+		if strings.Contains(err.Error(), "message_not_found") {
+			return nil
+		}
+		return fmt.Errorf("slack: delete message: %w", err)
+	}
+	return nil
+}
+
+func (p *Platform) ProgressStyle() string {
+	return "compact"
+}
+
+var _ core.MessageUpdater = (*Platform)(nil)
+var _ core.PreviewStarter = (*Platform)(nil)
+var _ core.PreviewCleaner = (*Platform)(nil)
+var _ core.ProgressStyleProvider = (*Platform)(nil)
+
 func (p *Platform) downloadSlackFile(url string) ([]byte, error) {
 	if url == "" {
 		return nil, fmt.Errorf("empty URL")

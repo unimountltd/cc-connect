@@ -395,12 +395,10 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 			w.content = trimCompactProgressText(w.content, compactProgressMaxChars)
 		}
 	default:
-		if w.content == "" {
-			w.content = fallback
-		} else {
-			w.content += "\n\n" + fallback
-		}
-		w.content = trimCompactProgressText(w.content, compactProgressMaxChars)
+		// Show only the latest entry so the message stays short on
+		// platforms like Slack where compact progress is a single
+		// auto-updating message.
+		w.content = fallback
 	}
 
 	if w.content == w.lastSent {

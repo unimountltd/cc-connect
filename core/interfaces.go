@@ -107,6 +107,10 @@ This sends a message to the target bot and waits for its response (printed to st
 The conversation is visible in the group chat and each bot maintains its own relay session.
 
 Environment variables CC_PROJECT and CC_SESSION_KEY are already set, so the relay knows which group chat to use.
+
+### Session management
+When the user asks to reset/clear context or start a new session, run:
+  cc-connect send --session-cmd /new
 `
 }
 
