@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -42,7 +43,7 @@ type claudeSession struct {
 	alive           atomic.Bool
 }
 
-func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool) (*claudeSession, error) {
+func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool, maxContextTokens int) (*claudeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	args := []string{
@@ -85,6 +86,10 @@ func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode strin
 			sysPrompt += "\n## Formatting\n" + platformPrompt + "\n"
 		}
 		args = append(args, "--append-system-prompt", sysPrompt)
+	}
+
+	if maxContextTokens > 0 {
+		args = append(args, "--max-context-tokens", strconv.Itoa(maxContextTokens))
 	}
 
 	slog.Debug("claudeSession: starting", "args", core.RedactArgs(args), "dir", workDir, "mode", mode)
@@ -621,4 +626,3 @@ func filterEnv(env []string, key string) []string {
 	}
 	return out
 }
-

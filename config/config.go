@@ -20,6 +20,9 @@ var ConfigPath string
 type Config struct {
 	DataDir           string                  `toml:"data_dir"` // session store directory, default ~/.cc-connect
 	AttachmentSend    string                  `toml:"attachment_send"`
+	// Quiet is legacy: when true and [display] does not set thinking_messages / tool_messages,
+	// engines behave as if those flags were false. Per-project quiet overrides when set.
+	Quiet             *bool                   `toml:"quiet,omitempty"`
 	Projects          []ProjectConfig         `toml:"projects"`
 	Commands          []CommandConfig         `toml:"commands"`     // global custom slash commands
 	Aliases           []AliasConfig           `toml:"aliases"`      // global command aliases
@@ -33,7 +36,6 @@ type Config struct {
 	RateLimit         RateLimitConfig         `toml:"rate_limit"`          // per-session rate limiting
 	OutgoingRateLimit OutgoingRateLimitConfig `toml:"outgoing_rate_limit"` // outgoing message throttling
 	Relay             RelayConfig             `toml:"relay"`               // bot-to-bot relay behavior
-	Quiet             *bool                   `toml:"quiet,omitempty"`     // global default for quiet mode; project-level overrides this
 	Cron              CronConfig              `toml:"cron"`
 	Webhook           WebhookConfig           `toml:"webhook"`
 	Bridge            BridgeConfig            `toml:"bridge"`
@@ -74,9 +76,10 @@ type ManagementConfig struct {
 
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.
 type DisplayConfig struct {
-	ThinkingMaxLen *int  `toml:"thinking_max_len"` // max chars for thinking messages; 0 = no truncation; default 300
-	ToolMaxLen     *int  `toml:"tool_max_len"`     // max chars for tool use messages; 0 = no truncation; default 500
-	ToolMessages   *bool `toml:"tool_messages"`    // whether tool progress messages are shown; default true
+	ThinkingMessages *bool `toml:"thinking_messages"` // whether thinking messages are shown; default true
+	ThinkingMaxLen   *int  `toml:"thinking_max_len"`  // max chars for thinking messages; 0 = no truncation; default 300
+	ToolMaxLen       *int  `toml:"tool_max_len"`      // max chars for tool use messages; 0 = no truncation; default 500
+	ToolMessages     *bool `toml:"tool_messages"`     // whether tool progress messages are shown; default true
 }
 
 // StreamPreviewConfig controls real-time streaming preview in IM.
@@ -129,7 +132,7 @@ type RelayConfig struct {
 // SpeechConfig configures speech-to-text for voice messages.
 type SpeechConfig struct {
 	Enabled  bool   `toml:"enabled"`
-	Provider string `toml:"provider"` // "openai" | "groq" | "qwen"
+	Provider string `toml:"provider"` // "openai" | "groq" | "qwen" | "gemini"
 	Language string `toml:"language"` // e.g. "zh", "en"; empty = auto-detect
 	OpenAI   struct {
 		APIKey  string `toml:"api_key"`
@@ -145,6 +148,10 @@ type SpeechConfig struct {
 		BaseURL string `toml:"base_url"`
 		Model   string `toml:"model"`
 	} `toml:"qwen"`
+	Gemini struct {
+		APIKey string `toml:"api_key"`
+		Model  string `toml:"model"`
+	} `toml:"gemini"`
 }
 
 // TTSConfig configures text-to-speech output (mirrors SpeechConfig style).
@@ -204,11 +211,13 @@ type ProjectConfig struct {
 	ResetOnIdleMins *int `toml:"reset_on_idle_mins,omitempty"`
 	// ShowContextIndicator: nil/true = append [ctx: ~N%] to assistant replies; false = hide.
 	ShowContextIndicator *bool        `toml:"show_context_indicator,omitempty"`
-	Quiet                *bool        `toml:"quiet,omitempty"`             // project-level quiet mode; overrides global setting
 	InjectSender         *bool        `toml:"inject_sender,omitempty"`     // prepend sender identity (platform + user ID) to each message sent to the agent
 	DisabledCommands     []string     `toml:"disabled_commands,omitempty"` // commands to disable for this project (e.g. ["restart", "upgrade"])
 	AdminFrom            string       `toml:"admin_from,omitempty"`        // comma-separated user IDs allowed to run privileged commands; "*" = all allowed users
 	Users                *UsersConfig `toml:"users,omitempty"`             // per-user role config; nil = legacy behavior
+	// Quiet is legacy per-project override; see Config.Quiet. When true and global [display]
+	// omits thinking_messages / tool_messages, those default to off for this project.
+	Quiet *bool `toml:"quiet,omitempty"`
 }
 
 type AgentConfig struct {
@@ -287,6 +296,49 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 	return cfg, nil
+}
+
+// projectQuietEffective returns whether legacy quiet applies to this project: an explicit
+// per-project quiet overrides; otherwise the global root quiet applies.
+func projectQuietEffective(cfg *Config, proj *ProjectConfig) bool {
+	if proj.Quiet != nil {
+		return *proj.Quiet
+	}
+	if cfg.Quiet != nil {
+		return *cfg.Quiet
+	}
+	return false
+}
+
+// EffectiveDisplay resolves global [display] together with legacy quiet (root or per-project).
+// If quiet is in effect and thinking_messages / tool_messages were not explicitly set in [display],
+// they map to false (backward-compatible with pre-display quiet = true).
+func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (thinkingMessages, toolMessages bool, thinkingMaxLen, toolMaxLen int) {
+	thinkingMessages = true
+	toolMessages = true
+	thinkingMaxLen = 300
+	toolMaxLen = 500
+	if cfg.Display.ThinkingMessages != nil {
+		thinkingMessages = *cfg.Display.ThinkingMessages
+	}
+	if cfg.Display.ToolMessages != nil {
+		toolMessages = *cfg.Display.ToolMessages
+	}
+	if cfg.Display.ThinkingMaxLen != nil {
+		thinkingMaxLen = *cfg.Display.ThinkingMaxLen
+	}
+	if cfg.Display.ToolMaxLen != nil {
+		toolMaxLen = *cfg.Display.ToolMaxLen
+	}
+	if projectQuietEffective(cfg, proj) {
+		if cfg.Display.ThinkingMessages == nil {
+			thinkingMessages = false
+		}
+		if cfg.Display.ToolMessages == nil {
+			toolMessages = false
+		}
+	}
+	return thinkingMessages, toolMessages, thinkingMaxLen, toolMaxLen
 }
 
 func (c *Config) validate() error {
@@ -568,7 +620,7 @@ func saveConfig(cfg *Config) error {
 //   - removes empty section headers (no key-value pairs between this header and the next)
 //
 // It deliberately keeps all key-value lines intact, including zero-value ones
-// (e.g. `quiet = false`, `port = 0`), because those may be explicitly set by the user.
+// (e.g. `thinking_messages = false`, `port = 0`), because those may be explicitly set by the user.
 func formatTOML(raw string) string {
 	lines := strings.Split(raw, "\n")
 
@@ -788,7 +840,7 @@ func RemoveAlias(name string) error {
 }
 
 // SaveDisplayConfig persists the display settings to the config file.
-func SaveDisplayConfig(thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
+func SaveDisplayConfig(thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
 	configMu.Lock()
 	defer configMu.Unlock()
 	if ConfigPath == "" {
@@ -801,6 +853,9 @@ func SaveDisplayConfig(thinkingMaxLen, toolMaxLen *int, toolMessages *bool) erro
 	cfg := &Config{}
 	if err := toml.Unmarshal(data, cfg); err != nil {
 		return fmt.Errorf("parse config: %w", err)
+	}
+	if thinkingMessages != nil {
+		cfg.Display.ThinkingMessages = thinkingMessages
 	}
 	if thinkingMaxLen != nil {
 		cfg.Display.ThinkingMaxLen = thinkingMaxLen
@@ -1816,7 +1871,6 @@ func extractLineComment(line string) string {
 
 // ProjectSettingsUpdate carries optional field updates for SaveProjectSettings.
 type ProjectSettingsUpdate struct {
-	Quiet                *bool
 	Language             *string
 	AdminFrom            *string
 	DisabledCommands     []string
@@ -1851,9 +1905,6 @@ func SaveProjectSettings(projectName string, update ProjectSettingsUpdate) error
 			continue
 		}
 		proj := &cfg.Projects[i]
-		if update.Quiet != nil {
-			proj.Quiet = update.Quiet
-		}
 		if update.AdminFrom != nil {
 			proj.AdminFrom = *update.AdminFrom
 		}
@@ -2117,21 +2168,26 @@ func GetGlobalSettings() map[string]any {
 		"attachment_send": cfg.AttachmentSend,
 		"log_level":       cfg.Log.Level,
 	}
-	if cfg.Quiet != nil {
-		result["quiet"] = *cfg.Quiet
-	} else {
-		result["quiet"] = false
-	}
 	if cfg.IdleTimeoutMins != nil {
 		result["idle_timeout_mins"] = *cfg.IdleTimeoutMins
 	} else {
 		result["idle_timeout_mins"] = 120
 	}
 	// Display
+	if cfg.Display.ThinkingMessages != nil {
+		result["thinking_messages"] = *cfg.Display.ThinkingMessages
+	} else {
+		result["thinking_messages"] = true
+	}
 	if cfg.Display.ThinkingMaxLen != nil {
 		result["thinking_max_len"] = *cfg.Display.ThinkingMaxLen
 	} else {
 		result["thinking_max_len"] = 300
+	}
+	if cfg.Display.ToolMessages != nil {
+		result["tool_messages"] = *cfg.Display.ToolMessages
+	} else {
+		result["tool_messages"] = true
 	}
 	if cfg.Display.ToolMaxLen != nil {
 		result["tool_max_len"] = *cfg.Display.ToolMaxLen
@@ -2166,11 +2222,12 @@ func GetGlobalSettings() map[string]any {
 // GlobalSettingsUpdate holds fields to update in global config.
 type GlobalSettingsUpdate struct {
 	Language           *string `json:"language"`
-	Quiet              *bool   `json:"quiet"`
 	AttachmentSend     *string `json:"attachment_send"`
 	LogLevel           *string `json:"log_level"`
 	IdleTimeoutMins    *int    `json:"idle_timeout_mins"`
+	ThinkingMessages   *bool   `json:"thinking_messages"`
 	ThinkingMaxLen     *int    `json:"thinking_max_len"`
+	ToolMessages       *bool   `json:"tool_messages"`
 	ToolMaxLen         *int    `json:"tool_max_len"`
 	StreamPreviewOn    *bool   `json:"stream_preview_enabled"`
 	StreamPreviewIntMs *int    `json:"stream_preview_interval_ms"`
@@ -2196,9 +2253,6 @@ func SaveGlobalSettings(u GlobalSettingsUpdate) error {
 	if u.Language != nil {
 		cfg.Language = *u.Language
 	}
-	if u.Quiet != nil {
-		cfg.Quiet = u.Quiet
-	}
 	if u.AttachmentSend != nil {
 		cfg.AttachmentSend = *u.AttachmentSend
 	}
@@ -2208,8 +2262,14 @@ func SaveGlobalSettings(u GlobalSettingsUpdate) error {
 	if u.IdleTimeoutMins != nil {
 		cfg.IdleTimeoutMins = u.IdleTimeoutMins
 	}
+	if u.ThinkingMessages != nil {
+		cfg.Display.ThinkingMessages = u.ThinkingMessages
+	}
 	if u.ThinkingMaxLen != nil {
 		cfg.Display.ThinkingMaxLen = u.ThinkingMaxLen
+	}
+	if u.ToolMessages != nil {
+		cfg.Display.ToolMessages = u.ToolMessages
 	}
 	if u.ToolMaxLen != nil {
 		cfg.Display.ToolMaxLen = u.ToolMaxLen

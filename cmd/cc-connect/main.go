@@ -282,23 +282,15 @@ func main() {
 			engine.SetUserRoles(buildUserRoleManager(proj.Users))
 		}
 
-		// Wire display truncation settings
+		// Wire display truncation settings (includes legacy quiet → display mapping)
 		{
-			dcfg := core.DisplayCfg{
-				ThinkingMaxLen: 300,
-				ToolMaxLen:     500,
-				ToolMessages:   true,
-			}
-			if cfg.Display.ThinkingMaxLen != nil {
-				dcfg.ThinkingMaxLen = *cfg.Display.ThinkingMaxLen
-			}
-			if cfg.Display.ToolMaxLen != nil {
-				dcfg.ToolMaxLen = *cfg.Display.ToolMaxLen
-			}
-			if cfg.Display.ToolMessages != nil {
-				dcfg.ToolMessages = *cfg.Display.ToolMessages
-			}
-			engine.SetDisplayConfig(dcfg)
+			tm, tool, tmlen, toollen := config.EffectiveDisplay(cfg, &proj)
+			engine.SetDisplayConfig(core.DisplayCfg{
+				ThinkingMessages: tm,
+				ThinkingMaxLen:   tmlen,
+				ToolMaxLen:       toollen,
+				ToolMessages:     tool,
+			})
 		}
 
 		// Wire streaming preview
@@ -367,8 +359,8 @@ func main() {
 			}
 		}
 
-		engine.SetDisplaySaveFunc(func(thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
-			return config.SaveDisplayConfig(thinkingMaxLen, toolMaxLen, toolMessages)
+		engine.SetDisplaySaveFunc(func(thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
+			return config.SaveDisplayConfig(thinkingMessages, thinkingMaxLen, toolMaxLen, toolMessages)
 		})
 
 		// Wire idle timeout
@@ -379,13 +371,6 @@ func main() {
 			} else {
 				engine.SetEventIdleTimeout(time.Duration(mins) * time.Minute)
 			}
-		}
-
-		// Wire default quiet mode: project-level overrides global
-		if proj.Quiet != nil {
-			engine.SetDefaultQuiet(*proj.Quiet)
-		} else if cfg.Quiet != nil {
-			engine.SetDefaultQuiet(*cfg.Quiet)
 		}
 
 		// Wire auto-compress settings
@@ -435,6 +420,14 @@ func main() {
 					speechCfg.STT = core.NewQwenASR(apiKey, baseURL, model)
 				} else {
 					slog.Warn("speech: qwen provider enabled but api_key is empty")
+				}
+			case "gemini":
+				apiKey := cfg.Speech.Gemini.APIKey
+				model := cfg.Speech.Gemini.Model
+				if apiKey != "" {
+					speechCfg.STT = core.NewGeminiSTT(apiKey, model)
+				} else {
+					slog.Warn("speech: gemini provider enabled but api_key is empty")
 				}
 			default: // "openai" or unspecified
 				apiKey := cfg.Speech.OpenAI.APIKey
@@ -750,7 +743,6 @@ func main() {
 		mgmtSrv.SetRemoveProject(config.RemoveProject)
 		mgmtSrv.SetSaveProjectSettings(func(name string, u core.ProjectSettingsUpdate) error {
 			return config.SaveProjectSettings(name, config.ProjectSettingsUpdate{
-				Quiet:                u.Quiet,
 				Language:             u.Language,
 				AdminFrom:            u.AdminFrom,
 				DisabledCommands:     u.DisabledCommands,
@@ -768,9 +760,6 @@ func main() {
 			if v, ok := updates["language"].(string); ok {
 				u.Language = &v
 			}
-			if v, ok := updates["quiet"].(bool); ok {
-				u.Quiet = &v
-			}
 			if v, ok := updates["attachment_send"].(string); ok {
 				u.AttachmentSend = &v
 			}
@@ -781,9 +770,15 @@ func main() {
 				iv := int(v)
 				u.IdleTimeoutMins = &iv
 			}
+			if v, ok := updates["thinking_messages"].(bool); ok {
+				u.ThinkingMessages = &v
+			}
 			if v, ok := updates["thinking_max_len"].(float64); ok {
 				iv := int(v)
 				u.ThinkingMaxLen = &iv
+			}
+			if v, ok := updates["tool_messages"].(bool); ok {
+				u.ToolMessages = &v
 			}
 			if v, ok := updates["tool_max_len"].(float64); ok {
 				iv := int(v)
@@ -1204,28 +1199,15 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		return nil, fmt.Errorf("project %q not found in config", projName)
 	}
 
-	// Reload display config
-	dcfg := core.DisplayCfg{ThinkingMaxLen: 300, ToolMaxLen: 500, ToolMessages: true}
-	if cfg.Display.ThinkingMaxLen != nil {
-		dcfg.ThinkingMaxLen = *cfg.Display.ThinkingMaxLen
-	}
-	if cfg.Display.ToolMaxLen != nil {
-		dcfg.ToolMaxLen = *cfg.Display.ToolMaxLen
-	}
-	if cfg.Display.ToolMessages != nil {
-		dcfg.ToolMessages = *cfg.Display.ToolMessages
-	}
-	engine.SetDisplayConfig(dcfg)
+	// Reload display config (includes legacy quiet → display mapping)
+	tm, tool, tmlen, toollen := config.EffectiveDisplay(cfg, proj)
+	engine.SetDisplayConfig(core.DisplayCfg{
+		ThinkingMessages: tm,
+		ThinkingMaxLen:   tmlen,
+		ToolMaxLen:       toollen,
+		ToolMessages:     tool,
+	})
 	result.DisplayUpdated = true
-
-	// Reload default quiet mode
-	if proj.Quiet != nil {
-		engine.SetDefaultQuiet(*proj.Quiet)
-	} else if cfg.Quiet != nil {
-		engine.SetDefaultQuiet(*cfg.Quiet)
-	} else {
-		engine.SetDefaultQuiet(false)
-	}
 
 	// Reload auto-compress settings
 	if proj.AutoCompress.Enabled != nil && *proj.AutoCompress.Enabled {
