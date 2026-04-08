@@ -363,6 +363,18 @@ func (sm *SessionManager) AllSessions() []*Session {
 	return out
 }
 
+// ActiveUserKeys returns all user keys (session keys) that currently have an
+// active persisted session. Order is not guaranteed.
+func (sm *SessionManager) ActiveUserKeys() []string {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	keys := make([]string, 0, len(sm.activeSession))
+	for k := range sm.activeSession {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
 // SessionKeyMap returns a mapping from session ID to the user key (session_key) it belongs to,
 // plus active session IDs for each user key.
 func (sm *SessionManager) SessionKeyMap() (idToKey map[string]string, activeIDs map[string]bool) {
