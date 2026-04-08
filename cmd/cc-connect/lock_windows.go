@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"golang.org/x/sys/windows"
 )
@@ -50,9 +51,15 @@ func acquireSingleInstanceLock(lockPath string) (release func(), err error) {
 		return nil, fmt.Errorf("write lock file: %w", err)
 	}
 
+	// Wrap release in sync.Once so callers (e.g. an explicit release before
+	// /restart, plus the deferred release in main) can call it more than
+	// once without double-closing the handle or unlocking a stale one.
+	var once sync.Once
 	release = func() {
-		_ = windows.UnlockFileEx(windows.Handle(f.Fd()), 0, 1, 0, ol)
-		_ = f.Close()
+		once.Do(func() {
+			_ = windows.UnlockFileEx(windows.Handle(f.Fd()), 0, 1, 0, ol)
+			_ = f.Close()
+		})
 	}
 	return release, nil
 }

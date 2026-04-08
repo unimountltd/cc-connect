@@ -56,6 +56,31 @@ func TestAcquireSingleInstanceLock(t *testing.T) {
 	release3()
 }
 
+func TestAcquireSingleInstanceLock_ReleaseIsIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	lockPath := filepath.Join(dir, "test.lock")
+
+	release, err := acquireSingleInstanceLock(lockPath)
+	if err != nil {
+		t.Fatalf("acquire failed: %v", err)
+	}
+
+	// Calling release multiple times must be safe — main.go does this on the
+	// /restart path: an explicit release before restartProcess() plus the
+	// deferred release at function exit on Windows where restartProcess
+	// returns instead of replacing the image.
+	release()
+	release()
+	release()
+
+	// After release, the lock must be reacquirable.
+	release2, err := acquireSingleInstanceLock(lockPath)
+	if err != nil {
+		t.Fatalf("acquire after multi-release failed: %v", err)
+	}
+	release2()
+}
+
 func TestAcquireSingleInstanceLock_CreatesParentDir(t *testing.T) {
 	dir := t.TempDir()
 	// Lock path inside a not-yet-created subdirectory.

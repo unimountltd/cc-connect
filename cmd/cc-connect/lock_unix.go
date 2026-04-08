@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 )
 
@@ -52,9 +53,15 @@ func acquireSingleInstanceLock(lockPath string) (release func(), err error) {
 		return nil, fmt.Errorf("write lock file: %w", err)
 	}
 
+	// Wrap release in sync.Once so callers (e.g. an explicit release before
+	// /restart, plus the deferred release in main) can call it more than
+	// once without double-closing the FD or unlocking a stale handle.
+	var once sync.Once
 	release = func() {
-		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-		_ = f.Close()
+		once.Do(func() {
+			_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+			_ = f.Close()
+		})
 	}
 	return release, nil
 }
