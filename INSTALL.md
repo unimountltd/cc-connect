@@ -686,18 +686,18 @@ cc-connect update
 cc-connect update --pre
 
 # Latest rolling build from the main branch (bleeding edge, unstable)
-cc-connect update --channel main
+cc-connect update --channel latest
 
 # Pin to a specific tagged version
 cc-connect update --version v1.2.0
 ```
 
-The `--channel main` builds are produced by CI on every passing push to
-`main` and tagged as a single rolling pre-release. They are intended for
-testing — expect breakage.
+The `--channel latest` builds are produced by CI on every passing push
+to `main` and tagged as a single rolling pre-release named `latest`.
+They are intended for testing — expect breakage.
 
 `--version` accepts either `v1.2.3` or `1.2.3`. The flag is mutually
-exclusive with `--channel main` and `--pre`.
+exclusive with `--channel latest` and `--pre`.
 
 ### npm users
 

@@ -1140,7 +1140,7 @@ Commands:
 
   update             Check for updates and upgrade the binary
                        (default: latest stable)
-    --channel main     install latest rolling main build (unstable)
+    --channel latest   install latest rolling build (unstable)
     --version <tag>    install a specific tagged release (e.g. v1.2.3)
     --pre, --beta      include pre-releases when picking latest stable
   check-update       Check if a newer version is available

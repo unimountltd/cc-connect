@@ -1,13 +1,16 @@
-name: Release (main rolling)
+name: Release (latest rolling)
 
-# Publishes a rolling pre-release tagged "main" with binaries for every push
+# Publishes a rolling pre-release tagged "latest" with binaries for every push
 # to main that passes CI. Users on the bleeding edge install with:
 #
-#     cc-connect update --channel main
+#     cc-connect update --channel latest
 #
-# The release tag is fixed at "main" so the updater can fetch it via
-# /repos/.../releases/tags/main. The actual binary version is embedded as
-# main-<short-sha> via the Makefile's VERSION variable.
+# The release tag is fixed at "latest" so the updater can fetch it via
+# /repos/.../releases/tags/latest. The actual binary version is embedded as
+# latest-<short-sha> via the Makefile's VERSION variable.
+#
+# The tag is named "latest" rather than "main" so it doesn't shadow the main
+# branch and break `git push origin main` with src-refspec ambiguity.
 
 on:
   workflow_run:
@@ -19,7 +22,7 @@ permissions:
   contents: write
 
 jobs:
-  publish-main:
+  publish-latest:
     # Only run when the upstream CI run finished successfully on main.
     if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main' }}
     runs-on: ubuntu-latest
@@ -61,28 +64,28 @@ jobs:
           set -euo pipefail
           SHA=$(git rev-parse --short HEAD)
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
-          echo "ver=main-$SHA" >> "$GITHUB_OUTPUT"
+          echo "ver=latest-$SHA" >> "$GITHUB_OUTPUT"
 
       - name: Build all platforms
         run: make release-all VERSION=${{ steps.ver.outputs.ver }}
 
-      - name: Refresh rolling 'main' release
+      - name: Refresh rolling 'latest' release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           # Best-effort cleanup of the existing rolling release and tag.
-          gh release delete main --yes 2>/dev/null || true
-          git push origin :refs/tags/main 2>/dev/null || true
+          gh release delete latest --yes 2>/dev/null || true
+          git push origin :refs/tags/latest 2>/dev/null || true
 
-          gh release create main \
+          gh release create latest \
             --prerelease \
             --target "${{ github.event.workflow_run.head_sha }}" \
-            --title "main (rolling, ${{ steps.ver.outputs.ver }})" \
+            --title "latest (rolling, ${{ steps.ver.outputs.ver }})" \
             --notes "Rolling build from main @ \`${{ steps.ver.outputs.sha }}\`. **Unstable** — for testing only.
 
           Install with:
 
-              cc-connect update --channel main" \
+              cc-connect update --channel latest" \
             dist/cc-connect-${{ steps.ver.outputs.ver }}-* \
             dist/checksums.txt

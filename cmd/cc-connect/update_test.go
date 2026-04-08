@@ -158,8 +158,8 @@ func TestNormalizeVersionTag(t *testing.T) {
 		{"1.2.3", "v1.2.3"},
 		{"  1.2.3  ", "v1.2.3"},
 		{"v1.2.3-beta.1", "v1.2.3-beta.1"},
-		{"main", "main"},
-		{"main-abc1234", "main-abc1234"},
+		{"latest", "latest"},
+		{"latest-abc1234", "latest-abc1234"},
 	}
 	for _, tt := range tests {
 		got := normalizeVersionTag(tt.in)
@@ -193,9 +193,9 @@ func TestParseUpdateArgs(t *testing.T) {
 			wantOpts: updateOpts{channel: "stable", pre: true},
 		},
 		{
-			name:     "channel main",
-			args:     []string{"--channel", "main"},
-			wantOpts: updateOpts{channel: "main"},
+			name:     "channel latest",
+			args:     []string{"--channel", "latest"},
+			wantOpts: updateOpts{channel: "latest"},
 		},
 		{
 			name:     "version pin normalizes leading v",
@@ -208,8 +208,8 @@ func TestParseUpdateArgs(t *testing.T) {
 			wantOpts: updateOpts{channel: "stable", pinVersion: "v1.2.3"},
 		},
 		{
-			name:      "version + channel main is rejected",
-			args:      []string{"--version", "v1.2.3", "--channel", "main"},
+			name:      "version + channel latest is rejected",
+			args:      []string{"--version", "v1.2.3", "--channel", "latest"},
 			wantErr:   true,
 			errSubstr: "mutually exclusive",
 		},
@@ -220,8 +220,8 @@ func TestParseUpdateArgs(t *testing.T) {
 			errSubstr: "mutually exclusive",
 		},
 		{
-			name:      "channel main + pre is rejected",
-			args:      []string{"--channel", "main", "--pre"},
+			name:      "channel latest + pre is rejected",
+			args:      []string{"--channel", "latest", "--pre"},
 			wantErr:   true,
 			errSubstr: "mutually exclusive",
 		},
@@ -288,24 +288,24 @@ func TestSelectAssetURLs(t *testing.T) {
 	}
 }
 
-func TestSelectAssetURLs_MainChannelShaName(t *testing.T) {
-	// Main channel: tag is "main" but asset names embed the short SHA.
+func TestSelectAssetURLs_LatestChannelShaName(t *testing.T) {
+	// Latest channel: tag is "latest" but asset names embed the short SHA.
 	rel := &githubRelease{
-		TagName: "main",
-		Name:    "main (rolling, main-abc1234)",
+		TagName: "latest",
+		Name:    "latest (rolling, latest-abc1234)",
 		Assets: []releaseAsset{
-			{Name: "cc-connect-main-abc1234-linux-amd64.tar.gz", BrowserDownloadURL: "https://example/main-linux"},
-			{Name: "cc-connect-main-abc1234-darwin-arm64.tar.gz", BrowserDownloadURL: "https://example/main-darwin"},
-			{Name: "cc-connect-main-abc1234-windows-amd64.zip", BrowserDownloadURL: "https://example/main-win"},
+			{Name: "cc-connect-latest-abc1234-linux-amd64.tar.gz", BrowserDownloadURL: "https://example/latest-linux"},
+			{Name: "cc-connect-latest-abc1234-darwin-arm64.tar.gz", BrowserDownloadURL: "https://example/latest-darwin"},
+			{Name: "cc-connect-latest-abc1234-windows-amd64.zip", BrowserDownloadURL: "https://example/latest-win"},
 		},
 	}
 	_, arc := selectAssetURLs(rel, "darwin", "arm64")
-	if arc != "https://example/main-darwin" {
-		t.Errorf("main-channel darwin/arm64 archive = %q, want main-darwin", arc)
+	if arc != "https://example/latest-darwin" {
+		t.Errorf("latest-channel darwin/arm64 archive = %q, want latest-darwin", arc)
 	}
 }
 
-func TestExtractMainVersionFromAssets(t *testing.T) {
+func TestExtractLatestVersionFromAssets(t *testing.T) {
 	tests := []struct {
 		name   string
 		assets []releaseAsset
@@ -314,26 +314,26 @@ func TestExtractMainVersionFromAssets(t *testing.T) {
 		{
 			name: "linux asset",
 			assets: []releaseAsset{
-				{Name: "cc-connect-main-abc1234-linux-amd64.tar.gz"},
+				{Name: "cc-connect-latest-abc1234-linux-amd64.tar.gz"},
 			},
-			want: "main-abc1234",
+			want: "latest-abc1234",
 		},
 		{
 			name: "darwin asset",
 			assets: []releaseAsset{
-				{Name: "cc-connect-main-def5678-darwin-arm64.tar.gz"},
+				{Name: "cc-connect-latest-def5678-darwin-arm64.tar.gz"},
 			},
-			want: "main-def5678",
+			want: "latest-def5678",
 		},
 		{
 			name: "windows asset",
 			assets: []releaseAsset{
-				{Name: "cc-connect-main-abcdef0-windows-amd64.zip"},
+				{Name: "cc-connect-latest-abcdef0-windows-amd64.zip"},
 			},
-			want: "main-abcdef0",
+			want: "latest-abcdef0",
 		},
 		{
-			name: "no main assets",
+			name: "no latest assets",
 			assets: []releaseAsset{
 				{Name: "cc-connect-v1.2.3-linux-amd64.tar.gz"},
 			},
@@ -348,9 +348,9 @@ func TestExtractMainVersionFromAssets(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rel := &githubRelease{Assets: tt.assets}
-			got := extractMainVersionFromAssets(rel)
+			got := extractLatestVersionFromAssets(rel)
 			if got != tt.want {
-				t.Errorf("extractMainVersionFromAssets() = %q, want %q", got, tt.want)
+				t.Errorf("extractLatestVersionFromAssets() = %q, want %q", got, tt.want)
 			}
 		})
 	}
@@ -370,28 +370,28 @@ func TestReleaseDisplayVersion(t *testing.T) {
 			want: "v1.2.3",
 		},
 		{
-			name: "main prefers asset-derived sha",
+			name: "latest prefers asset-derived sha",
 			rel: &githubRelease{
-				TagName: "main",
-				Name:    "main (rolling)",
+				TagName: "latest",
+				Name:    "latest (rolling)",
 				Assets: []releaseAsset{
-					{Name: "cc-connect-main-abc1234-linux-amd64.tar.gz"},
+					{Name: "cc-connect-latest-abc1234-linux-amd64.tar.gz"},
 				},
 			},
-			opts: updateOpts{channel: "main"},
-			want: "main-abc1234",
+			opts: updateOpts{channel: "latest"},
+			want: "latest-abc1234",
 		},
 		{
-			name: "main falls back to release name when assets miss",
-			rel:  &githubRelease{TagName: "main", Name: "main-fallback"},
-			opts: updateOpts{channel: "main"},
-			want: "main-fallback",
+			name: "latest falls back to release name when assets miss",
+			rel:  &githubRelease{TagName: "latest", Name: "latest-fallback"},
+			opts: updateOpts{channel: "latest"},
+			want: "latest-fallback",
 		},
 		{
-			name: "main falls back to tag when name and assets both empty",
-			rel:  &githubRelease{TagName: "main"},
-			opts: updateOpts{channel: "main"},
-			want: "main",
+			name: "latest falls back to tag when name and assets both empty",
+			rel:  &githubRelease{TagName: "latest"},
+			opts: updateOpts{channel: "latest"},
+			want: "latest",
 		},
 	}
 	for _, tt := range tests {
@@ -433,8 +433,8 @@ func TestFetchLatestStableReleaseFrom_APINotFound(t *testing.T) {
 	if !strings.Contains(msg, "no stable release") {
 		t.Errorf("error %q should mention 'no stable release'", msg)
 	}
-	if !strings.Contains(msg, "--channel main") {
-		t.Errorf("error %q should suggest '--channel main'", msg)
+	if !strings.Contains(msg, "--channel latest") {
+		t.Errorf("error %q should suggest '--channel latest'", msg)
 	}
 	if !strings.Contains(msg, "--pre") {
 		t.Errorf("error %q should suggest '--pre'", msg)

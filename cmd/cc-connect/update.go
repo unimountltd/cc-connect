@@ -29,10 +29,11 @@ const (
 	githubTagAPI = "https://api.github.com/repos/" + githubRepo + "/releases/tags"
 	downloadBase = "https://github.com/" + githubRepo + "/releases/download"
 
-	// mainChannelTag is the rolling pre-release tag that the main-branch CD
+	// latestChannelTag is the rolling pre-release tag that the main-branch CD
 	// pipeline force-updates on every push to main. It is fixed; the binary
-	// version inside is main-<short-sha>.
-	mainChannelTag = "main"
+	// version inside is latest-<short-sha>. The tag is named "latest" rather
+	// than "main" so it doesn't shadow the main branch in `git push`.
+	latestChannelTag = "latest"
 )
 
 // cachedLatestVersion 缓存最新版本信息，避免频繁请求API
@@ -123,8 +124,8 @@ func runUpdate() {
 	switch {
 	case opts.pinVersion != "":
 		fmt.Printf("Installing pinned version %s ...\n", opts.pinVersion)
-	case opts.channel == "main":
-		fmt.Println("Checking latest main build (rolling, unstable)...")
+	case opts.channel == "latest":
+		fmt.Println("Checking latest rolling build (unstable)...")
 	case opts.pre:
 		fmt.Println("Checking for updates (including pre-releases)...")
 	default:
@@ -140,9 +141,9 @@ func runUpdate() {
 	latest := release.TagName
 	displayVer := releaseDisplayVersion(release, opts)
 
-	// For pinned versions and the main channel, skip the "is newer?" guard —
+	// For pinned versions and the latest channel, skip the "is newer?" guard —
 	// the user explicitly asked for a specific build.
-	skipNewerCheck := opts.pinVersion != "" || opts.channel == "main"
+	skipNewerCheck := opts.pinVersion != "" || opts.channel == "latest"
 
 	if !skipNewerCheck {
 		if !isNewer(latest, version) {
@@ -155,7 +156,7 @@ func runUpdate() {
 	}
 
 	label := displayVer
-	if release.Prerelease && opts.channel != "main" {
+	if release.Prerelease && opts.channel != "latest" {
 		label += " (pre-release)"
 	}
 	fmt.Printf("Installing: %s → %s\n", version, label)
@@ -202,9 +203,9 @@ func runUpdate() {
 		os.Exit(1)
 	}
 
-	// npm package.json sync only makes sense for stable semver tags. Main
-	// builds use main-<sha> identifiers that npm wouldn't accept anyway.
-	if opts.channel != "main" {
+	// npm package.json sync only makes sense for stable semver tags. Rolling
+	// builds use latest-<sha> identifiers that npm wouldn't accept anyway.
+	if opts.channel != "latest" {
 		syncNpmPackageVersion(execPath, strings.TrimPrefix(displayVer, "v"))
 	}
 
@@ -214,7 +215,7 @@ func runUpdate() {
 
 // updateOpts captures the parsed CLI options for `cc-connect update`.
 type updateOpts struct {
-	channel    string // "stable" (default) or "main"
+	channel    string // "stable" (default) or "latest"
 	pre        bool   // include pre-releases when picking latest stable
 	pinVersion string // explicit tag to install (e.g. "v1.2.3"), normalized
 }
@@ -226,7 +227,7 @@ func parseUpdateArgs(args []string) (updateOpts, error) {
 	fs.SetOutput(io.Discard) // we print our own usage on error
 	pre := fs.Bool("pre", false, "include pre-releases when resolving 'stable' channel")
 	beta := fs.Bool("beta", false, "alias for --pre")
-	channel := fs.String("channel", "stable", "release channel: stable | main")
+	channel := fs.String("channel", "stable", "release channel: stable | latest")
 	pinVersion := fs.String("version", "", "install a specific tag (e.g. v1.2.3)")
 	if err := fs.Parse(args); err != nil {
 		return updateOpts{}, err
@@ -240,17 +241,17 @@ func parseUpdateArgs(args []string) (updateOpts, error) {
 	if opts.channel == "" {
 		opts.channel = "stable"
 	}
-	if opts.channel != "stable" && opts.channel != "main" {
-		return updateOpts{}, fmt.Errorf("unknown --channel %q (must be 'stable' or 'main')", *channel)
+	if opts.channel != "stable" && opts.channel != "latest" {
+		return updateOpts{}, fmt.Errorf("unknown --channel %q (must be 'stable' or 'latest')", *channel)
 	}
-	if opts.pinVersion != "" && opts.channel == "main" {
-		return updateOpts{}, fmt.Errorf("--version and --channel main are mutually exclusive")
+	if opts.pinVersion != "" && opts.channel == "latest" {
+		return updateOpts{}, fmt.Errorf("--version and --channel latest are mutually exclusive")
 	}
 	if opts.pinVersion != "" && opts.pre {
 		return updateOpts{}, fmt.Errorf("--version and --pre are mutually exclusive (the pin already names a specific build)")
 	}
-	if opts.channel == "main" && opts.pre {
-		return updateOpts{}, fmt.Errorf("--channel main and --pre are mutually exclusive (main is already a pre-release stream)")
+	if opts.channel == "latest" && opts.pre {
+		return updateOpts{}, fmt.Errorf("--channel latest and --pre are mutually exclusive (latest is already a pre-release stream)")
 	}
 	return opts, nil
 }
@@ -259,18 +260,18 @@ func printUpdateUsage(w io.Writer) {
 	fmt.Fprintln(w, `Usage: cc-connect update [flags]
 
 Flags:
-  --channel <stable|main>   Release channel (default: stable)
+  --channel <stable|latest> Release channel (default: stable)
                               stable: latest tagged release
-                              main:   latest rolling build from main branch (unstable)
+                              latest: latest rolling build from main branch (unstable)
   --version <tag>           Install a specific tagged release (e.g. v1.2.3 or 1.2.3)
-                              Mutually exclusive with --channel main and --pre.
+                              Mutually exclusive with --channel latest and --pre.
   --pre, --beta             Include pre-releases when picking latest stable
-                              Mutually exclusive with --channel main and --version.
+                              Mutually exclusive with --channel latest and --version.
 
 Examples:
   cc-connect update                       # latest stable
   cc-connect update --pre                 # latest including pre-releases
-  cc-connect update --channel main        # latest rolling main build
+  cc-connect update --channel latest      # latest rolling build
   cc-connect update --version v1.2.0      # pin to a specific tag`)
 }
 
@@ -279,22 +280,23 @@ func resolveTargetRelease(opts updateOpts) (*githubRelease, error) {
 	switch {
 	case opts.pinVersion != "":
 		return fetchReleaseByTag(opts.pinVersion)
-	case opts.channel == "main":
-		return fetchReleaseByTag(mainChannelTag)
+	case opts.channel == "latest":
+		return fetchReleaseByTag(latestChannelTag)
 	default:
 		return fetchRelease(opts.pre)
 	}
 }
 
 // releaseDisplayVersion picks the user-facing version label for a release.
-// For the main channel the rolling tag is just "main", but the release Name
-// (or asset names) carry the actual main-<sha> identifier we want to show.
+// For the latest channel the rolling tag is just "latest", but the release
+// Name (or asset names) carry the actual latest-<sha> identifier we want
+// to show.
 func releaseDisplayVersion(rel *githubRelease, opts updateOpts) string {
 	if rel == nil {
 		return ""
 	}
-	if opts.channel == "main" {
-		if v := extractMainVersionFromAssets(rel); v != "" {
+	if opts.channel == "latest" {
+		if v := extractLatestVersionFromAssets(rel); v != "" {
 			return v
 		}
 		if rel.Name != "" {
@@ -304,10 +306,10 @@ func releaseDisplayVersion(rel *githubRelease, opts updateOpts) string {
 	return rel.TagName
 }
 
-// extractMainVersionFromAssets pulls the "main-<sha>" identifier out of an
-// asset filename like "cc-connect-main-abc1234-darwin-arm64.tar.gz". Returns
-// "" if no asset matches the pattern.
-func extractMainVersionFromAssets(rel *githubRelease) string {
+// extractLatestVersionFromAssets pulls the "latest-<sha>" identifier out of
+// an asset filename like "cc-connect-latest-abc1234-darwin-arm64.tar.gz".
+// Returns "" if no asset matches the pattern.
+func extractLatestVersionFromAssets(rel *githubRelease) string {
 	const prefix = "cc-connect-"
 	for _, a := range rel.Assets {
 		name := a.Name
@@ -315,10 +317,10 @@ func extractMainVersionFromAssets(rel *githubRelease) string {
 			continue
 		}
 		rest := strings.TrimPrefix(name, prefix)
-		// rest looks like "main-abc1234-darwin-arm64.tar.gz" — split off the
+		// rest looks like "latest-abc1234-darwin-arm64.tar.gz" — split off the
 		// trailing "-<goos>-<goarch>..." and keep the version prefix.
 		idx := strings.Index(rest, "-")
-		if idx < 0 || !strings.HasPrefix(rest, "main-") {
+		if idx < 0 || !strings.HasPrefix(rest, "latest-") {
 			continue
 		}
 		// Find the position where "-<goos>-" starts. We assume goos is one of
@@ -521,7 +523,7 @@ func fetchLatestStableReleaseFrom(apiURL, htmlURL string) (*githubRelease, error
 // most likely to give the user a working install on a fork that only
 // publishes rolling/pre-release builds.
 func errNoStableRelease() error {
-	return fmt.Errorf("no stable release found for %s; try 'cc-connect update --channel main' for the rolling main build, or 'cc-connect update --pre' to include pre-releases", githubRepo)
+	return fmt.Errorf("no stable release found for %s; try 'cc-connect update --channel latest' for the rolling build, or 'cc-connect update --pre' to include pre-releases", githubRepo)
 }
 
 func binaryAssetName(tag string) string {
