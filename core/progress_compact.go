@@ -190,7 +190,7 @@ func inferLegacyEntryKind(entry string) ProgressCardEntryKind {
 	switch {
 	case strings.HasPrefix(entry, "💭"):
 		return ProgressEntryThinking
-	case strings.HasPrefix(entry, "🔧"), strings.Contains(entry, "**Tool #"):
+	case strings.HasPrefix(entry, "🔧"), strings.HasPrefix(entry, "👩🏻\u200d💻"), strings.Contains(entry, "**Tool #"), strings.Contains(entry, "**Working on step"):
 		return ProgressEntryToolUse
 	case strings.HasPrefix(entry, "🧾"):
 		return ProgressEntryToolResult

@@ -562,11 +562,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangChinese: "💭 %s",
 	},
 	MsgTool: {
-		LangEnglish:            "🔧 **Tool #%d: %s**\n---\n%s",
-		LangChinese:            "🔧 **工具 #%d: %s**\n---\n%s",
-		LangTraditionalChinese: "🔧 **工具 #%d: %s**\n---\n%s",
-		LangJapanese:           "🔧 **ツール #%d: %s**\n---\n%s",
-		LangSpanish:            "🔧 **Herramienta #%d: %s**\n---\n%s",
+		LangEnglish:            "👩🏻‍💻 **Working on step %d: %s**\n---\n%s",
+		LangChinese:            "👩🏻‍💻 **正在处理步骤 %d: %s**\n---\n%s",
+		LangTraditionalChinese: "👩🏻‍💻 **正在處理步驟 %d: %s**\n---\n%s",
+		LangJapanese:           "👩🏻‍💻 **ステップ %d を実行中: %s**\n---\n%s",
+		LangSpanish:            "👩🏻‍💻 **Trabajando en paso %d: %s**\n---\n%s",
 	},
 	MsgToolResult: {
 		LangEnglish:            "📤 **%s**\n---\n%s",
