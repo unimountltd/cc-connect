@@ -448,13 +448,35 @@ func fetchLatestPreRelease() (*githubRelease, error) {
 
 // fetchLatestStableRelease fetches the latest stable release (no pre-releases).
 func fetchLatestStableRelease() (*githubRelease, error) {
+	return fetchLatestStableReleaseFrom(githubAPI, "https://github.com/"+githubRepo+"/releases/latest")
+}
+
+// fetchLatestStableReleaseFrom is the testable core of fetchLatestStableRelease.
+// It accepts the GitHub API URL and the HTML "/releases/latest" URL as
+// parameters so tests can point them at httptest.Server instances.
+//
+// Two paths feed the same answer:
+//  1. The JSON API at /releases/latest. A 200 returns the release directly;
+//     a 404 is treated as a definitive "no stable release exists" — GitHub
+//     is the source of truth here, no point falling back to HTML scraping.
+//  2. For transient failures (network errors, 5xx, malformed JSON), follow
+//     the HTML redirect at /releases/latest. A real stable release redirects
+//     to /releases/tag/<tag>; if it instead lands on the bare /releases
+//     listing, no stable release is published.
+func fetchLatestStableReleaseFrom(apiURL, htmlURL string) (*githubRelease, error) {
 	client := &http.Client{Timeout: 15 * time.Second}
-	req, _ := http.NewRequest("GET", githubAPI, nil)
+	req, _ := http.NewRequest("GET", apiURL, nil)
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 
 	resp, err := client.Do(req)
 	if err == nil {
 		defer resp.Body.Close()
+		// 404 is GitHub telling us the repo has no published stable release.
+		// Skip the HTML fallback — it would arrive at the same answer with a
+		// less actionable error.
+		if resp.StatusCode == http.StatusNotFound {
+			return nil, errNoStableRelease()
+		}
 		if resp.StatusCode == 200 {
 			var release githubRelease
 			if err := json.NewDecoder(resp.Body).Decode(&release); err == nil {
@@ -463,15 +485,15 @@ func fetchLatestStableRelease() (*githubRelease, error) {
 		}
 	}
 
-	// Fallback: follow redirect from /releases/latest to extract tag
-	latestURL := "https://github.com/" + githubRepo + "/releases/latest"
+	// Fallback: follow redirect from /releases/latest to extract tag.
+	// Used for transient API errors / non-JSON responses.
 	noRedirect := &http.Client{
 		Timeout: 15 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}
-	resp2, err := noRedirect.Get(latestURL)
+	resp2, err := noRedirect.Get(htmlURL)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -479,13 +501,27 @@ func fetchLatestStableRelease() (*githubRelease, error) {
 
 	loc := resp2.Header.Get("Location")
 	if loc == "" {
-		return nil, fmt.Errorf("no release found")
+		return nil, errNoStableRelease()
+	}
+	// GitHub redirects /releases/latest → /releases/tag/<tag> when a stable
+	// release exists. If it instead redirects to the bare /releases listing,
+	// no stable release is published.
+	if !strings.Contains(loc, "/tag/") {
+		return nil, errNoStableRelease()
 	}
 	parts := strings.Split(loc, "/tag/")
 	if len(parts) != 2 {
 		return nil, fmt.Errorf("unexpected redirect: %s", loc)
 	}
 	return &githubRelease{TagName: parts[1], HTMLURL: loc}, nil
+}
+
+// errNoStableRelease is the user-facing error returned when GitHub confirms
+// no stable release exists for githubRepo. The text suggests the two flags
+// most likely to give the user a working install on a fork that only
+// publishes rolling/pre-release builds.
+func errNoStableRelease() error {
+	return fmt.Errorf("no stable release found for %s; try 'cc-connect update --channel main' for the rolling main build, or 'cc-connect update --pre' to include pre-releases", githubRepo)
 }
 
 func binaryAssetName(tag string) string {

@@ -2,6 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -398,6 +401,124 @@ func TestReleaseDisplayVersion(t *testing.T) {
 				t.Errorf("releaseDisplayVersion() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestFetchLatestStableReleaseFrom_APINotFound is a regression test for the
+// "unexpected redirect" error users hit when the configured fork has no
+// published stable release. A 404 from the GitHub API must produce a clear,
+// actionable error and must NOT silently fall through to the HTML scrape.
+func TestFetchLatestStableReleaseFrom_APINotFound(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer api.Close()
+
+	// Fail loudly if the HTML fallback is touched on a definitive 404 —
+	// the whole point of the fix is to skip it.
+	htmlHits := 0
+	html := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		htmlHits++
+	}))
+	defer html.Close()
+
+	rel, err := fetchLatestStableReleaseFrom(api.URL, html.URL)
+	if err == nil {
+		t.Fatalf("expected error, got release %+v", rel)
+	}
+	if htmlHits != 0 {
+		t.Errorf("HTML fallback called %d times on API 404, want 0", htmlHits)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "no stable release") {
+		t.Errorf("error %q should mention 'no stable release'", msg)
+	}
+	if !strings.Contains(msg, "--channel main") {
+		t.Errorf("error %q should suggest '--channel main'", msg)
+	}
+	if !strings.Contains(msg, "--pre") {
+		t.Errorf("error %q should suggest '--pre'", msg)
+	}
+}
+
+// TestFetchLatestStableReleaseFrom_HTMLRedirectsToReleasesListing covers the
+// other path that produced the original "unexpected redirect" message: the
+// API returns a transient 5xx, the HTML fallback runs, but GitHub redirects
+// to the bare /releases listing because no stable release exists.
+func TestFetchLatestStableReleaseFrom_HTMLRedirectsToReleasesListing(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer api.Close()
+
+	html := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "https://github.com/Unimountltd/cc-connect/releases")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer html.Close()
+
+	_, err := fetchLatestStableReleaseFrom(api.URL, html.URL)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "no stable release") {
+		t.Errorf("error %q should mention 'no stable release'", msg)
+	}
+	if strings.Contains(msg, "unexpected redirect") {
+		t.Errorf("error %q should NOT use the legacy 'unexpected redirect' wording", msg)
+	}
+}
+
+// TestFetchLatestStableReleaseFrom_HTMLRedirectExtractsTag verifies the
+// happy path of the HTML fallback (transient API failure, but a real stable
+// release does exist). The function should parse the tag from the redirect
+// Location header.
+func TestFetchLatestStableReleaseFrom_HTMLRedirectExtractsTag(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer api.Close()
+
+	html := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "https://github.com/Unimountltd/cc-connect/releases/tag/v1.2.3")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer html.Close()
+
+	rel, err := fetchLatestStableReleaseFrom(api.URL, html.URL)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rel.TagName != "v1.2.3" {
+		t.Errorf("TagName = %q, want v1.2.3", rel.TagName)
+	}
+}
+
+// TestFetchLatestStableReleaseFrom_APISuccess verifies the happy path: API
+// returns 200 with valid JSON and the HTML fallback is never touched.
+func TestFetchLatestStableReleaseFrom_APISuccess(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"tag_name": "v1.2.3", "name": "v1.2.3", "html_url": "https://example/v1.2.3"}`)
+	}))
+	defer api.Close()
+
+	htmlHits := 0
+	html := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		htmlHits++
+	}))
+	defer html.Close()
+
+	rel, err := fetchLatestStableReleaseFrom(api.URL, html.URL)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rel.TagName != "v1.2.3" {
+		t.Errorf("TagName = %q, want v1.2.3", rel.TagName)
+	}
+	if htmlHits != 0 {
+		t.Errorf("HTML fallback called %d times on API success, want 0", htmlHits)
 	}
 }
 
