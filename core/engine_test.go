@@ -6413,6 +6413,47 @@ func TestBareStop_ShortCircuitsToStopCommand(t *testing.T) {
 	}
 }
 
+func TestBareNewSession_ShortCircuitsToNewCommand(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	key := "test:user1"
+	session := e.sessions.GetOrCreateActive(key)
+	session.AddHistory("user", "hello")
+
+	for _, input := range []string{"new session", "New Session", "NEW SESSION"} {
+		msg := &Message{
+			SessionKey: key,
+			Platform:   "test",
+			Content:    input,
+			ReplyCtx:   "ctx",
+		}
+		e.handleMessage(p, msg)
+
+		sent := p.getSent()
+		found := false
+		for _, s := range sent {
+			if strings.Contains(s, "New session") || strings.Contains(s, "new session") || strings.Contains(s, "✨") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("input %q: expected new session confirmation, got %v", input, sent)
+		}
+		p.clearSent()
+	}
+
+	// "new session please" should NOT trigger
+	msg := &Message{
+		SessionKey: key,
+		Platform:   "test",
+		Content:    "new session please",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+	// Should go to agent, not create a session
+}
+
 func TestCompactProgress_IncludesStopHint(t *testing.T) {
 	p := &stubCompactProgressPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
 	w := newCompactProgressWriter(context.Background(), p, "ctx", "claudecode", LangEnglish)

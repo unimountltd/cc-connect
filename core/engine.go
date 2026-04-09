@@ -1394,12 +1394,18 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		}
 	}
 
-	// Bare "stop" (case-insensitive, exact match) is a shortcut for /stop.
-	// This lets users abort a running session without a "/" prefix, which
-	// platforms like Slack intercept as a slash command.
-	if len(msg.Images) == 0 && strings.EqualFold(content, "stop") {
-		content = "/stop"
-		msg.Content = content
+	// Bare "stop" and "new session" (case-insensitive, exact match) are
+	// shortcuts for /stop and /new. This lets users on platforms like Slack
+	// (where "/" is intercepted as a slash command) use these commands.
+	if len(msg.Images) == 0 {
+		switch {
+		case strings.EqualFold(content, "stop"):
+			content = "/stop"
+			msg.Content = content
+		case strings.EqualFold(content, "new session"):
+			content = "/new"
+			msg.Content = content
+		}
 	}
 
 	if len(msg.Images) == 0 && strings.HasPrefix(content, "/") {
@@ -1464,6 +1470,8 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 
 	if rotated := e.maybeAutoResetSessionOnIdle(p, msg, sessions, interactiveKey, session); rotated != nil {
 		session = rotated
+	} else {
+		e.maybeSuggestNewSession(p, msg, session)
 	}
 
 	slog.Info("processing message",
@@ -1509,6 +1517,25 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgSessionAutoResetIdle, int(e.resetOnIdle/time.Minute)))
 	return newSession
+}
+
+const newSessionHintIdleThreshold = 4 * time.Hour
+
+// maybeSuggestNewSession sends a one-time hint suggesting the user start a
+// new session when the current one has been idle for 4+ hours. Unlike
+// maybeAutoResetSessionOnIdle this does not reset anything — it just nudges.
+func (e *Engine) maybeSuggestNewSession(p Platform, msg *Message, session *Session) {
+	if session == nil {
+		return
+	}
+	if len(session.GetHistory(1)) == 0 {
+		return
+	}
+	lastActive := session.GetUpdatedAt()
+	if lastActive.IsZero() || time.Since(lastActive) < newSessionHintIdleThreshold {
+		return
+	}
+	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNewSessionHint))
 }
 
 // queueMessageForBusySession queues a message for later delivery when the
