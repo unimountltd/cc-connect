@@ -31,6 +31,7 @@ type SendRequest struct {
 	Project    string            `json:"project"`
 	SessionKey string            `json:"session_key"`
 	Message    string            `json:"message"`
+	SessionCmd string            `json:"session_cmd,omitempty"` // slash command routed to engine (e.g. "/new")
 	Images     []ImageAttachment `json:"images,omitempty"`
 	Files      []FileAttachment  `json:"files,omitempty"`
 }
@@ -42,6 +43,14 @@ func NewAPIServer(dataDir string) (*APIServer, error) {
 		return nil, fmt.Errorf("create run dir: %w", err)
 	}
 	sockPath := filepath.Join(sockDir, "api.sock")
+
+	// Check if another bridge is already running by probing the socket.
+	// If a connection succeeds the socket is live → another instance exists.
+	// If it fails the socket is stale (crashed) or absent → safe to proceed.
+	if conn, err := net.Dial("unix", sockPath); err == nil {
+		conn.Close()
+		return nil, fmt.Errorf("another cc-connect bridge is already running (socket: %s)", sockPath)
+	}
 
 	// Remove stale socket
 	os.Remove(sockPath)
@@ -141,8 +150,8 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if req.Message == "" && len(req.Images) == 0 && len(req.Files) == 0 {
-		http.Error(w, "message or attachment is required", http.StatusBadRequest)
+	if req.Message == "" && len(req.Images) == 0 && len(req.Files) == 0 && req.SessionCmd == "" {
+		http.Error(w, "message, attachment, or session_cmd is required", http.StatusBadRequest)
 		return
 	}
 
@@ -164,6 +173,15 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 
 	if !ok {
 		http.Error(w, fmt.Sprintf("project %q not found", req.Project), http.StatusNotFound)
+		return
+	}
+
+	if req.SessionCmd != "" {
+		if err := engine.ExecuteSessionCmd(req.SessionKey, req.SessionCmd); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		apiJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return
 	}
 

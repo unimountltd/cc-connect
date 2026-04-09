@@ -107,19 +107,6 @@ func main() {
 		return
 	}
 
-	// Enforce single-instance: only one long-running cc-connect daemon may run
-	// at a time per user on this machine. Subcommands handled above (version,
-	// send, cron, daemon, sessions, etc.) have already returned and do NOT take
-	// this lock. The lock is held for the lifetime of this process; the kernel
-	// releases it on exit, including crashes.
-	releaseLock, err := acquireSingleInstanceLock(defaultLockPath())
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		fmt.Fprintln(os.Stderr, "Stop the existing instance first, or use a subcommand (e.g. `cc-connect send`, `cc-connect daemon status`).")
-		os.Exit(1)
-	}
-	defer releaseLock()
-
 	core.VersionInfo = fmt.Sprintf("cc-connect %s\ncommit: %s\nbuilt: %s", version, commit, buildTime)
 	core.CurrentVersion = version
 
@@ -906,11 +893,6 @@ func main() {
 			}
 		}
 		slog.Info("restarting...", "path", execPath, "args", os.Args)
-		// Release the single-instance lock before restarting so the new process
-		// can acquire it. On Unix syscall.Exec replaces this image (deferred
-		// release would never run); on Windows we spawn a child and exit, so
-		// releasing here avoids a race where the child can't get the lock yet.
-		releaseLock()
 		if err := restartProcess(execPath); err != nil {
 			slog.Error("restart: failed", "error", err)
 			os.Exit(1)
