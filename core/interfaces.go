@@ -130,6 +130,14 @@ type TypingIndicator interface {
 	StartTyping(ctx context.Context, replyCtx any) (stop func())
 }
 
+// CompletionReactor is an optional interface for platforms that can show a
+// persistent emoji reaction indicating the outcome of a turn.
+// The engine calls ReactCompletion after the turn ends and the typing
+// indicator has been stopped.
+type CompletionReactor interface {
+	ReactCompletion(ctx context.Context, replyCtx any, success bool)
+}
+
 // ImageSender is an optional interface for platforms that support sending images.
 type ImageSender interface {
 	SendImage(ctx context.Context, replyCtx any, img ImageAttachment) error

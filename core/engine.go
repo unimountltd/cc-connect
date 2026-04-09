@@ -2305,6 +2305,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		}
 	}()
 
+	// reactCompletion adds a persistent emoji reaction indicating the outcome.
+	reactCompletion := func(success bool) {
+		if cr, ok := state.platform.(CompletionReactor); ok {
+			cr.ReactCompletion(e.ctx, replyCtx, success)
+		}
+	}
+
 	state.mu.Lock()
 	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx)
 	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang())
@@ -2812,6 +2819,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					slog.Debug("async send error after EventResult", "error", err)
 				}
 			}
+			reactCompletion(true)
 			return
 
 		case EventError:
@@ -2846,6 +2854,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if state.agentSession == nil || !state.agentSession.Alive() {
 				e.notifyDroppedQueuedMessages(state, event.Error)
 			}
+			reactCompletion(false)
 			return
 		}
 	}
@@ -2855,6 +2864,7 @@ channelClosed:
 	slog.Warn("agent process exited", "session_key", sessionKey)
 	e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent process exited"))
 	e.cleanupInteractiveState(sessionKey, state)
+	reactCompletion(false)
 
 	if len(textParts) > 0 {
 		state.mu.Lock()

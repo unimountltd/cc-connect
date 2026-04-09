@@ -635,8 +635,8 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 		mu.Unlock()
 	}
 
-	// Immediately add eyes
-	addReaction("eyes")
+	// Immediately add in-progress indicator
+	addReaction("female-technologist::skin-tone-2")
 
 	extras := []string{
 		"hourglass_flowing_sand", "hourglass", "gear", "hammer_and_wrench",
@@ -689,6 +689,23 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 				slog.Debug("slack: remove reaction failed", "emoji", emoji, "error", err)
 			}
 		}
+	}
+}
+
+// ReactCompletion adds a persistent emoji reaction indicating the outcome of
+// a turn: checkered_flag for success, woman-raising-hand for problems.
+func (p *Platform) ReactCompletion(_ context.Context, rctx any, success bool) {
+	rc, ok := rctx.(replyContext)
+	if !ok || rc.channel == "" || rc.timestamp == "" {
+		return
+	}
+	ref := slack.ItemRef{Channel: rc.channel, Timestamp: rc.timestamp}
+	emoji := "checkered_flag"
+	if !success {
+		emoji = "woman-raising-hand::skin-tone-2"
+	}
+	if err := p.client.AddReaction(emoji, ref); err != nil {
+		slog.Debug("slack: completion reaction failed", "emoji", emoji, "error", err)
 	}
 }
 
