@@ -558,6 +558,7 @@ const (
 	MsgCompactFindingFiles MsgKey = "compact_finding_files"
 	MsgCompactDelegating   MsgKey = "compact_delegating"
 	MsgCompactToolGeneric  MsgKey = "compact_tool_generic"
+	MsgCompactStopHint     MsgKey = "compact_stop_hint"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -3728,6 +3729,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "🔧 %s",
 		LangJapanese:           "🔧 %s",
 		LangSpanish:            "🔧 %s",
+	},
+	MsgCompactStopHint: {
+		LangEnglish:            `send "stop" to abort`,
+		LangChinese:            `发送 "stop" 以中止`,
+		LangTraditionalChinese: `傳送 "stop" 以中止`,
+		LangJapanese:           `"stop" で中止`,
+		LangSpanish:            `envía "stop" para abortar`,
 	},
 }
 

@@ -222,8 +222,9 @@ type compactProgressWriter struct {
 	style      string
 	usePayload bool
 
-	content    string
-	entries    []string
+	content     string
+	baseContent string // content without stop hint, used for final update
+	entries     []string
 	items      []ProgressCardEntry
 	state      ProgressCardState
 	agentName  string
@@ -412,6 +413,13 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 		} else {
 			w.content = fallback
 		}
+		// Append abort hint so the user always sees how to stop a running turn.
+		w.baseContent = w.content
+		if w.content != "" {
+			if hint := translateMsg(w.lang, MsgCompactStopHint); hint != "" {
+				w.content += " · " + hint
+			}
+		}
 	}
 
 	if w.content == w.lastSent {
@@ -460,7 +468,25 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 // Finalize updates card progress state (running/completed/failed) without
 // appending a new progress entry.
 func (w *compactProgressWriter) Finalize(state ProgressCardState) bool {
-	if !w.enabled || w.failed || w.style != progressStyleCard || !w.usePayload || w.handle == nil {
+	if !w.enabled || w.failed || w.handle == nil {
+		return false
+	}
+	// Compact style: strip the stop hint on completion so it doesn't linger.
+	if w.style != progressStyleCard {
+		if w.baseContent != "" && w.baseContent != w.lastSent {
+			callCtx, cancel := w.withAPITimeout()
+			err := w.updater.UpdateMessage(callCtx, w.handle, w.baseContent)
+			cancel()
+			if err != nil {
+				slog.Warn("progress writer: Finalize compact UpdateMessage failed", "platform", w.platform.Name(), "error", err)
+			} else {
+				w.lastSent = w.baseContent
+				w.content = w.baseContent
+			}
+		}
+		return true
+	}
+	if !w.usePayload {
 		return false
 	}
 	if state == "" {

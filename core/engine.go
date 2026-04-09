@@ -1394,6 +1394,14 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		}
 	}
 
+	// Bare "stop" (case-insensitive, exact match) is a shortcut for /stop.
+	// This lets users abort a running session without a "/" prefix, which
+	// platforms like Slack intercept as a slash command.
+	if len(msg.Images) == 0 && strings.EqualFold(content, "stop") {
+		content = "/stop"
+		msg.Content = content
+	}
+
 	if len(msg.Images) == 0 && strings.HasPrefix(content, "/") {
 		if e.handleCommand(p, msg, content) {
 			return

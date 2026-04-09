@@ -1105,11 +1105,17 @@ func TestProcessInteractiveEvents_CompactProgressCoalescesThinkingAndToolUse(t *
 	}
 
 	edits := p.getPreviewEdits()
-	if len(edits) != 1 {
-		t.Fatalf("preview edits = %d, want 1", len(edits))
+	if len(edits) < 1 {
+		t.Fatalf("preview edits = %d, want at least 1", len(edits))
 	}
 	if !strings.Contains(edits[0], "pwd") {
 		t.Fatalf("updated preview should contain tool input, got %q", edits[0])
+	}
+	// Finalize strips the stop hint, producing one more edit.
+	hint := `send "stop" to abort`
+	lastEdit := edits[len(edits)-1]
+	if strings.Contains(lastEdit, hint) {
+		t.Fatalf("final edit should not contain stop hint, got %q", lastEdit)
 	}
 }
 
@@ -6337,6 +6343,141 @@ func TestCmdStop_ReturnsWhileCloseBlockedAndStopsEventLoop(t *testing.T) {
 	case <-sess.closed:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Close did not finish after release")
+	}
+}
+
+func TestBareStop_ShortCircuitsToStopCommand(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	key := "test:user1"
+
+	state := &interactiveState{
+		agentSession: newControllableSession("s1"),
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	for _, input := range []string{"stop", "Stop", "STOP", "sToP"} {
+		// Re-add state for each iteration since /stop removes it
+		e.interactiveMu.Lock()
+		if _, ok := e.interactiveStates[key]; !ok {
+			e.interactiveStates[key] = &interactiveState{
+				agentSession: newControllableSession("s1"),
+				platform:     p,
+				replyCtx:     "ctx",
+			}
+		}
+		e.interactiveMu.Unlock()
+
+		msg := &Message{
+			SessionKey: key,
+			Platform:   "test",
+			Content:    input,
+			ReplyCtx:   "ctx",
+		}
+		e.handleMessage(p, msg)
+
+		e.interactiveMu.Lock()
+		_, exists := e.interactiveStates[key]
+		e.interactiveMu.Unlock()
+		if exists {
+			t.Fatalf("input %q: expected interactive state to be removed", input)
+		}
+	}
+
+	// Verify "stop" within a sentence does NOT trigger
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{
+		agentSession: newControllableSession("s2"),
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Unlock()
+
+	msg := &Message{
+		SessionKey: key,
+		Platform:   "test",
+		Content:    "stop the server",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	e.interactiveMu.Lock()
+	_, stillExists := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+	if !stillExists {
+		t.Fatal("\"stop the server\" should NOT trigger stop")
+	}
+}
+
+func TestCompactProgress_IncludesStopHint(t *testing.T) {
+	p := &stubCompactProgressPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	w := newCompactProgressWriter(context.Background(), p, "ctx", "claudecode", LangEnglish)
+
+	ok := w.AppendEvent(ProgressEntryToolUse, "Reading file", "Read", "Reading file")
+	if !ok {
+		t.Fatal("AppendEvent should succeed for compact writer")
+	}
+
+	starts := p.getPreviewStarts()
+	if len(starts) == 0 {
+		t.Fatal("expected at least one preview start")
+	}
+	hint := `send "stop" to abort`
+	if !strings.Contains(starts[0], hint) {
+		t.Fatalf("compact progress should contain stop hint, got %q", starts[0])
+	}
+}
+
+func TestCardProgress_DoesNotIncludeStopHint(t *testing.T) {
+	p := &stubCompactProgressPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "test"},
+		style:              "card",
+	}
+	w := newCompactProgressWriter(context.Background(), p, "ctx", "claudecode", LangEnglish)
+
+	ok := w.AppendEvent(ProgressEntryToolUse, "Reading file", "Read", "Reading file")
+	if !ok {
+		t.Fatal("AppendEvent should succeed for card writer")
+	}
+
+	starts := p.getPreviewStarts()
+	if len(starts) == 0 {
+		t.Fatal("expected at least one preview start")
+	}
+	hint := `send "stop" to abort`
+	if strings.Contains(starts[0], hint) {
+		t.Fatalf("card progress should NOT contain stop hint, got %q", starts[0])
+	}
+}
+
+func TestCompactProgress_FinalizeStripsHint(t *testing.T) {
+	p := &stubCompactProgressPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	w := newCompactProgressWriter(context.Background(), p, "ctx", "claudecode", LangEnglish)
+
+	w.AppendEvent(ProgressEntryToolUse, "Reading file", "Read", "Reading file")
+
+	hint := `send "stop" to abort`
+	starts := p.getPreviewStarts()
+	if len(starts) == 0 || !strings.Contains(starts[0], hint) {
+		t.Fatalf("expected hint in progress, got %q", starts)
+	}
+
+	w.Finalize(ProgressCardStateCompleted)
+
+	edits := p.getPreviewEdits()
+	if len(edits) == 0 {
+		t.Fatal("Finalize should produce an edit to strip the hint")
+	}
+	lastEdit := edits[len(edits)-1]
+	if strings.Contains(lastEdit, hint) {
+		t.Fatalf("finalized compact progress should not contain hint, got %q", lastEdit)
+	}
+	if lastEdit == "" {
+		t.Fatal("finalized content should not be empty")
 	}
 }
 
