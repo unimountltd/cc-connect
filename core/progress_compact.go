@@ -3,12 +3,17 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 )
+
+// compactStatusMaxLen caps the total rendered status line so it stays on a
+// single line and the chat below does not jump up/down on each update.
+const compactStatusMaxLen = 50
 
 const (
 	progressStyleLegacy  = "legacy"
@@ -397,8 +402,16 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 	default:
 		// Show only the latest entry so the message stays short on
 		// platforms like Slack where compact progress is a single
-		// auto-updating message.
-		w.content = fallback
+		// auto-updating message. Use a friendly one-liner when possible.
+		if friendly := renderCompactStatus(item, w.lang); friendly != "" {
+			w.content = friendly
+		} else if item.Kind == ProgressEntryToolResult {
+			// Keep showing the last tool-use status rather than
+			// replacing it with verbose result output.
+			return true
+		} else {
+			w.content = fallback
+		}
 	}
 
 	if w.content == w.lastSent {
@@ -493,6 +506,106 @@ func renderCardProgressMarkdownFallback(entries []string, truncated bool) string
 		b.WriteString(strings.ReplaceAll(entry, "\n", "\n   "))
 	}
 	return b.String()
+}
+
+// renderCompactStatus returns a friendly one-liner for compact progress.
+// Returns "" when the caller should fall through to default behavior.
+func renderCompactStatus(item ProgressCardEntry, lang Language) string {
+	var s string
+	switch item.Kind {
+	case ProgressEntryThinking:
+		s = translateMsg(lang, MsgCompactThinking)
+	case ProgressEntryToolUse:
+		s = renderCompactToolUse(item.Tool, item.Text, lang)
+	case ProgressEntryToolResult:
+		return "" // caller skips update
+	default:
+		return "" // fall through to fallback
+	}
+	// Enforce fixed max width so the message never wraps.
+	if utf8.RuneCountInString(s) > compactStatusMaxLen {
+		rs := []rune(s)
+		s = string(rs[:compactStatusMaxLen]) + "…"
+	}
+	return s
+}
+
+func renderCompactToolUse(tool, input string, lang Language) string {
+	// Pick the i18n template for this tool, then budget the input length
+	// so the final string fits within compactStatusMaxLen.
+	var key MsgKey
+	switch tool {
+	case "Read":
+		key = MsgCompactReading
+	case "Edit":
+		key = MsgCompactEditing
+	case "Write":
+		key = MsgCompactWriting
+	case "Bash", "shell", "run_shell_command":
+		key = MsgCompactRunning
+	case "Grep":
+		key = MsgCompactSearching
+	case "Glob":
+		key = MsgCompactFindingFiles
+	case "Agent":
+		return translateMsg(lang, MsgCompactDelegating)
+	default:
+		key = MsgCompactToolGeneric
+		if input == "" {
+			input = tool
+		} else {
+			input = tool + ": " + input
+		}
+	}
+
+	tmpl := translateMsg(lang, key)
+	// Estimate how many runes the prefix takes (template minus the %s placeholder).
+	prefixLen := utf8.RuneCountInString(tmpl) - 2 // "%s" = 2 chars
+	budget := compactStatusMaxLen - prefixLen
+	if budget < 10 {
+		budget = 10
+	}
+	brief := compactInputBrief(input, budget)
+	if brief == "" {
+		brief = tool
+	}
+	return fmt.Sprintf(tmpl, brief)
+}
+
+// compactInputBrief extracts a short one-line summary from tool input.
+func compactInputBrief(input string, maxLen int) string {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return ""
+	}
+	// Take first line only
+	if i := strings.IndexByte(input, '\n'); i >= 0 {
+		input = input[:i]
+	}
+	input = strings.TrimSpace(input)
+	if maxLen > 0 && utf8.RuneCountInString(input) > maxLen {
+		rs := []rune(input)
+		input = string(rs[:maxLen]) + "…"
+	}
+	return input
+}
+
+// translateMsg looks up a translated message by language with fallback to English.
+func translateMsg(lang Language, key MsgKey) string {
+	if msg, ok := messages[key]; ok {
+		if translated, ok := msg[lang]; ok {
+			return translated
+		}
+		if lang == LangTraditionalChinese {
+			if translated, ok := msg[LangChinese]; ok {
+				return translated
+			}
+		}
+		if msg[LangEnglish] != "" {
+			return msg[LangEnglish]
+		}
+	}
+	return string(key)
 }
 
 func trimCompactProgressText(s string, maxRunes int) string {

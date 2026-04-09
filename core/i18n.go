@@ -547,6 +547,17 @@ const (
 	MsgWsCloneProgress         MsgKey = "ws_clone_progress"
 	MsgWsCloneSuccess          MsgKey = "ws_clone_success"
 	MsgWsCloneFailed           MsgKey = "ws_clone_failed"
+
+	// Compact progress status lines (single auto-updating message).
+	MsgCompactThinking     MsgKey = "compact_thinking"
+	MsgCompactReading      MsgKey = "compact_reading"
+	MsgCompactEditing      MsgKey = "compact_editing"
+	MsgCompactWriting      MsgKey = "compact_writing"
+	MsgCompactRunning      MsgKey = "compact_running"
+	MsgCompactSearching    MsgKey = "compact_searching"
+	MsgCompactFindingFiles MsgKey = "compact_finding_files"
+	MsgCompactDelegating   MsgKey = "compact_delegating"
+	MsgCompactToolGeneric  MsgKey = "compact_tool_generic"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -3652,6 +3663,71 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 克隆倉庫失敗: %v",
 		LangJapanese:           "❌ リポジトリのクローンに失敗しました: %v",
 		LangSpanish:            "❌ Error al clonar repositorio: %v",
+	},
+
+	// Compact progress status lines
+	MsgCompactThinking: {
+		LangEnglish:            "💭 Thinking…",
+		LangChinese:            "💭 思考中…",
+		LangTraditionalChinese: "💭 思考中…",
+		LangJapanese:           "💭 考え中…",
+		LangSpanish:            "💭 Pensando…",
+	},
+	MsgCompactReading: {
+		LangEnglish:            "📖 Reading %s",
+		LangChinese:            "📖 正在读取 %s",
+		LangTraditionalChinese: "📖 正在讀取 %s",
+		LangJapanese:           "📖 読み取り中 %s",
+		LangSpanish:            "📖 Leyendo %s",
+	},
+	MsgCompactEditing: {
+		LangEnglish:            "✏️ Editing %s",
+		LangChinese:            "✏️ 正在编辑 %s",
+		LangTraditionalChinese: "✏️ 正在編輯 %s",
+		LangJapanese:           "✏️ 編集中 %s",
+		LangSpanish:            "✏️ Editando %s",
+	},
+	MsgCompactWriting: {
+		LangEnglish:            "📝 Writing %s",
+		LangChinese:            "📝 正在写入 %s",
+		LangTraditionalChinese: "📝 正在寫入 %s",
+		LangJapanese:           "📝 書き込み中 %s",
+		LangSpanish:            "📝 Escribiendo %s",
+	},
+	MsgCompactRunning: {
+		LangEnglish:            "⚡ Running: %s",
+		LangChinese:            "⚡ 执行中: %s",
+		LangTraditionalChinese: "⚡ 執行中: %s",
+		LangJapanese:           "⚡ 実行中: %s",
+		LangSpanish:            "⚡ Ejecutando: %s",
+	},
+	MsgCompactSearching: {
+		LangEnglish:            "🔍 Searching: %s",
+		LangChinese:            "🔍 搜索中: %s",
+		LangTraditionalChinese: "🔍 搜尋中: %s",
+		LangJapanese:           "🔍 検索中: %s",
+		LangSpanish:            "🔍 Buscando: %s",
+	},
+	MsgCompactFindingFiles: {
+		LangEnglish:            "🔍 Finding files: %s",
+		LangChinese:            "🔍 查找文件: %s",
+		LangTraditionalChinese: "🔍 尋找檔案: %s",
+		LangJapanese:           "🔍 ファイル検索: %s",
+		LangSpanish:            "🔍 Buscando archivos: %s",
+	},
+	MsgCompactDelegating: {
+		LangEnglish:            "🤖 Delegating task",
+		LangChinese:            "🤖 委派任务中",
+		LangTraditionalChinese: "🤖 委派任務中",
+		LangJapanese:           "🤖 タスク委譲中",
+		LangSpanish:            "🤖 Delegando tarea",
+	},
+	MsgCompactToolGeneric: {
+		LangEnglish:            "🔧 %s",
+		LangChinese:            "🔧 %s",
+		LangTraditionalChinese: "🔧 %s",
+		LangJapanese:           "🔧 %s",
+		LangSpanish:            "🔧 %s",
 	},
 }
 

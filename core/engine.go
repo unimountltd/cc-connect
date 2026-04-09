@@ -5958,6 +5958,62 @@ func (e *Engine) SendToSession(sessionKey, message string) error {
 	return e.SendToSessionWithAttachments(sessionKey, message, nil, nil)
 }
 
+// ExecuteSessionCmd routes a slash command (e.g. "/new") through the engine's
+// command handler as if the user typed it in the chat. Used by the API's
+// --session-cmd flag.
+func (e *Engine) ExecuteSessionCmd(sessionKey, command string) error {
+	if !strings.HasPrefix(command, "/") {
+		command = "/" + command
+	}
+
+	// Resolve platform and reply context from session key or active state.
+	var p Platform
+	var replyCtx any
+
+	e.interactiveMu.Lock()
+	if state, ok := e.interactiveStates[sessionKey]; ok {
+		state.mu.Lock()
+		p = state.platform
+		replyCtx = state.replyCtx
+		state.mu.Unlock()
+	}
+	e.interactiveMu.Unlock()
+
+	if p == nil {
+		// Try to reconstruct from session key
+		platformName := ""
+		if idx := strings.Index(sessionKey, ":"); idx > 0 {
+			platformName = sessionKey[:idx]
+		}
+		for _, candidate := range e.platforms {
+			if candidate.Name() == platformName {
+				if rc, ok := candidate.(ReplyContextReconstructor); ok {
+					reconstructed, err := rc.ReconstructReplyCtx(sessionKey)
+					if err != nil {
+						return fmt.Errorf("reconstruct reply context: %w", err)
+					}
+					p = candidate
+					replyCtx = reconstructed
+				}
+				break
+			}
+		}
+	}
+
+	if p == nil {
+		return fmt.Errorf("no platform found for session %q", sessionKey)
+	}
+
+	msg := &Message{
+		SessionKey: sessionKey,
+		Platform:   p.Name(),
+		Content:    command,
+		ReplyCtx:   replyCtx,
+	}
+	e.handleCommand(p, msg, command)
+	return nil
+}
+
 func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images []ImageAttachment, files []FileAttachment) error {
 	e.interactiveMu.Lock()
 

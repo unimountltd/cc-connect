@@ -74,6 +74,7 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 	var imagePaths []string
 	var filePaths []string
 	var positional []string
+	var sessionCmd string
 
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -109,6 +110,12 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 			filePaths = append(filePaths, args[i])
 		case "--stdin":
 			useStdin = true
+		case "--session-cmd":
+			if i+1 >= len(args) {
+				return req, "", fmt.Errorf("--session-cmd requires a value")
+			}
+			i++
+			sessionCmd = args[i]
 		case "--data-dir":
 			if i+1 >= len(args) {
 				return req, "", fmt.Errorf("--data-dir requires a value")
@@ -149,9 +156,10 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 	}
 	req.Images = images
 	req.Files = files
+	req.SessionCmd = sessionCmd
 
-	if req.Message == "" && len(req.Images) == 0 && len(req.Files) == 0 {
-		return req, "", fmt.Errorf("message or attachment is required")
+	if req.Message == "" && len(req.Images) == 0 && len(req.Files) == 0 && req.SessionCmd == "" {
+		return req, "", fmt.Errorf("message, attachment, or --session-cmd is required")
 	}
 
 	return req, dataDir, nil
