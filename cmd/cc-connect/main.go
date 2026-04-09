@@ -131,6 +131,13 @@ func main() {
 	config.ConfigPath = configPath
 	slog.Info("config loaded", "path", configPath)
 
+	// Singleton check: probe the API socket before starting any platforms
+	// or engines. If another bridge is already running, exit immediately.
+	if core.IsAPIServerRunning(cfg.DataDir) {
+		fmt.Fprintf(os.Stderr, "Error: another cc-connect bridge is already running\n")
+		os.Exit(1)
+	}
+
 	setupLogger(cfg.Log.Level, logWriter)
 
 	engines := make([]*core.Engine, 0, len(cfg.Projects))
