@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 )
@@ -29,6 +30,12 @@ const (
 	// Bound each platform progress-card API call so a hung upstream request
 	// does not block the whole turn forever.
 	compactProgressAPITimeout = 15 * time.Second
+
+	// How often the elapsed-time ticker refreshes the compact status line.
+	compactElapsedTickInterval = 5 * time.Second
+
+	// Show the "send stop to abort" hint only after this duration.
+	compactStopHintDelay = 10 * time.Second
 )
 
 type ProgressCardState string
@@ -222,16 +229,20 @@ type compactProgressWriter struct {
 	style      string
 	usePayload bool
 
-	content     string
-	baseContent string // content without stop hint, used for final update
-	entries     []string
-	items      []ProgressCardEntry
-	state      ProgressCardState
-	agentName  string
-	lang       Language
-	truncated  bool
-	lastSent   string
-	maxEntries int
+	mu             sync.Mutex
+	content        string
+	baseContent    string // content without stop hint, used for final update
+	entries        []string
+	items          []ProgressCardEntry
+	state          ProgressCardState
+	agentName      string
+	lang           Language
+	truncated      bool
+	lastSent       string
+	maxEntries     int
+	toolStartAt    time.Time  // when current tool_use started
+	toolBaseStatus string     // rendered status without elapsed/hint
+	tickerStop     chan struct{}
 }
 
 func normalizeProgressStyle(style string) string {
@@ -350,6 +361,8 @@ func (w *compactProgressWriter) AppendEvent(kind ProgressCardEntryKind, text str
 
 // AppendStructured appends one structured progress event and updates the in-place message.
 func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallback string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if !w.enabled || w.failed {
 		return false
 	}
@@ -401,23 +414,44 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 			w.content = trimCompactProgressText(w.content, compactProgressMaxChars)
 		}
 	default:
+		// ── compact style ──
 		// Show only the latest entry so the message stays short on
 		// platforms like Slack where compact progress is a single
 		// auto-updating message. Use a friendly one-liner when possible.
+		w.stopTickerLocked()
+
 		if friendly := renderCompactStatus(item, w.lang); friendly != "" {
 			w.content = friendly
 		} else if item.Kind == ProgressEntryToolResult {
-			// Keep showing the last tool-use status rather than
-			// replacing it with verbose result output.
+			// Tool completed: freeze elapsed time, strip stop hint.
+			if !w.toolStartAt.IsZero() && w.toolBaseStatus != "" {
+				w.baseContent = w.toolBaseStatus + " · " + formatElapsed(time.Since(w.toolStartAt))
+				w.content = w.baseContent
+				w.toolStartAt = time.Time{}
+				w.toolBaseStatus = ""
+				break // fall through to send update below
+			}
+			// No elapsed tracking — keep showing the last tool-use status.
 			return true
 		} else {
 			w.content = fallback
 		}
-		// Append abort hint so the user always sees how to stop a running turn.
+
 		w.baseContent = w.content
-		if w.content != "" {
-			if hint := translateMsg(w.lang, MsgCompactStopHint); hint != "" {
-				w.content += " · " + hint
+
+		if item.Kind == ProgressEntryToolUse {
+			// Track tool start for elapsed display; stop hint deferred to ticker.
+			w.toolStartAt = time.Now()
+			w.toolBaseStatus = w.content
+			w.startToolTickerLocked()
+		} else {
+			// Non-tool event: clear tool tracking, show stop hint immediately.
+			w.toolStartAt = time.Time{}
+			w.toolBaseStatus = ""
+			if w.content != "" {
+				if hint := translateMsg(w.lang, MsgCompactStopHint); hint != "" {
+					w.content += " · " + hint
+				}
 			}
 		}
 	}
@@ -468,6 +502,9 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 // Finalize updates card progress state (running/completed/failed) without
 // appending a new progress entry.
 func (w *compactProgressWriter) Finalize(state ProgressCardState) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.stopTickerLocked()
 	if !w.enabled || w.failed || w.handle == nil {
 		return false
 	}
@@ -632,6 +669,77 @@ func translateMsg(lang Language, key MsgKey) string {
 		}
 	}
 	return string(key)
+}
+
+// formatElapsed returns a short human-readable duration like "5s" or "2m13s".
+func formatElapsed(d time.Duration) string {
+	secs := int(d.Seconds())
+	if secs < 60 {
+		return fmt.Sprintf("%ds", secs)
+	}
+	return fmt.Sprintf("%dm%ds", secs/60, secs%60)
+}
+
+// stopTickerLocked stops the background elapsed-time ticker. Must be called
+// while w.mu is held.
+func (w *compactProgressWriter) stopTickerLocked() {
+	if w.tickerStop != nil {
+		close(w.tickerStop)
+		w.tickerStop = nil
+	}
+}
+
+// startToolTickerLocked spawns a goroutine that periodically refreshes the
+// compact status line with an elapsed-time suffix. Must be called while w.mu
+// is held; the goroutine acquires the lock on each tick.
+func (w *compactProgressWriter) startToolTickerLocked() {
+	w.tickerStop = make(chan struct{})
+	stop := w.tickerStop
+	go func() {
+		ticker := time.NewTicker(compactElapsedTickInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-w.ctx.Done():
+				return
+			case <-ticker.C:
+				w.refreshToolElapsed()
+			}
+		}
+	}()
+}
+
+// refreshToolElapsed is called by the ticker goroutine to update the compact
+// status line with the current elapsed time and conditionally show the stop hint.
+func (w *compactProgressWriter) refreshToolElapsed() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.toolBaseStatus == "" || w.failed || w.handle == nil {
+		return
+	}
+	elapsed := time.Since(w.toolStartAt)
+	content := w.toolBaseStatus + " · " + formatElapsed(elapsed)
+	w.baseContent = content
+	if elapsed >= compactStopHintDelay {
+		if hint := translateMsg(w.lang, MsgCompactStopHint); hint != "" {
+			content += " · " + hint
+		}
+	}
+	w.content = content
+	if w.content == w.lastSent {
+		return
+	}
+	callCtx, cancel := w.withAPITimeout()
+	err := w.updater.UpdateMessage(callCtx, w.handle, w.content)
+	cancel()
+	if err != nil {
+		slog.Warn("progress writer: elapsed UpdateMessage failed", "platform", w.platform.Name(), "error", err)
+		w.failed = true
+		return
+	}
+	w.lastSent = w.content
 }
 
 func trimCompactProgressText(s string, maxRunes int) string {

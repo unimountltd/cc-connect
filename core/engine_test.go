@@ -6454,7 +6454,7 @@ func TestBareNewSession_ShortCircuitsToNewCommand(t *testing.T) {
 	// Should go to agent, not create a session
 }
 
-func TestCompactProgress_IncludesStopHint(t *testing.T) {
+func TestCompactProgress_ToolUseDefersStopHint(t *testing.T) {
 	p := &stubCompactProgressPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
 	w := newCompactProgressWriter(context.Background(), p, "ctx", "claudecode", LangEnglish)
 
@@ -6468,8 +6468,28 @@ func TestCompactProgress_IncludesStopHint(t *testing.T) {
 		t.Fatal("expected at least one preview start")
 	}
 	hint := `send "stop" to abort`
+	// Stop hint is deferred for tool use — should NOT appear immediately.
+	if strings.Contains(starts[0], hint) {
+		t.Fatalf("compact progress should NOT contain stop hint on initial tool use, got %q", starts[0])
+	}
+}
+
+func TestCompactProgress_NonToolIncludesStopHint(t *testing.T) {
+	p := &stubCompactProgressPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	w := newCompactProgressWriter(context.Background(), p, "ctx", "claudecode", LangEnglish)
+
+	ok := w.AppendEvent(ProgressEntryThinking, "Planning approach", "", "💭 Thinking…")
+	if !ok {
+		t.Fatal("AppendEvent should succeed for compact writer")
+	}
+
+	starts := p.getPreviewStarts()
+	if len(starts) == 0 {
+		t.Fatal("expected at least one preview start")
+	}
+	hint := `send "stop" to abort`
 	if !strings.Contains(starts[0], hint) {
-		t.Fatalf("compact progress should contain stop hint, got %q", starts[0])
+		t.Fatalf("compact progress should contain stop hint for non-tool events, got %q", starts[0])
 	}
 }
 
@@ -6499,7 +6519,8 @@ func TestCompactProgress_FinalizeStripsHint(t *testing.T) {
 	p := &stubCompactProgressPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
 	w := newCompactProgressWriter(context.Background(), p, "ctx", "claudecode", LangEnglish)
 
-	w.AppendEvent(ProgressEntryToolUse, "Reading file", "Read", "Reading file")
+	// Use a thinking event which includes the stop hint immediately.
+	w.AppendEvent(ProgressEntryThinking, "Planning", "", "💭 Thinking…")
 
 	hint := `send "stop" to abort`
 	starts := p.getPreviewStarts()
