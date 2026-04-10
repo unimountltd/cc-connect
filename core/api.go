@@ -36,18 +36,6 @@ type SendRequest struct {
 	Files      []FileAttachment  `json:"files,omitempty"`
 }
 
-// IsAPIServerRunning probes the API socket to check if another bridge
-// instance is already running. Safe to call from any subcommand.
-func IsAPIServerRunning(dataDir string) bool {
-	sockPath := filepath.Join(dataDir, "run", "api.sock")
-	conn, err := net.Dial("unix", sockPath)
-	if err != nil {
-		return false
-	}
-	conn.Close()
-	return true
-}
-
 // NewAPIServer creates an API server on a Unix socket.
 func NewAPIServer(dataDir string) (*APIServer, error) {
 	sockDir := filepath.Join(dataDir, "run")
