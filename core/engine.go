@@ -1479,7 +1479,6 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	// shortcuts for /stop and /new. This lets users on platforms like Slack
 	// (where "/" is intercepted as a slash command) use these commands.
 	if len(msg.Images) == 0 {
-		slog.Info("bare command check", "content", content, "content_len", len(content), "content_bytes", fmt.Sprintf("%q", content))
 		switch {
 		case strings.EqualFold(content, "stop"):
 			content = "/stop"

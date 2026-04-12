@@ -795,14 +795,6 @@ func (w *compactProgressWriter) buildCompactBlock(activeLine string) string {
 	return "```\n" + body + "\n```"
 }
 
-// wrapCompact wraps content in a code block for compact style rendering.
-func (w *compactProgressWriter) wrapCompact(s string) string {
-	if s == "" {
-		return ""
-	}
-	return "```\n" + s + "\n```"
-}
-
 // formatElapsed returns a short human-readable duration like "5s" or "2m13s".
 func formatElapsed(d time.Duration) string {
 	secs := int(d.Seconds())
