@@ -395,7 +395,6 @@ const (
 	MsgNewSessionCreated     MsgKey = "new_session_created"
 	MsgNewSessionCreatedName MsgKey = "new_session_created_name"
 	MsgSessionAutoResetIdle     MsgKey = "session_auto_reset_idle"
-	MsgNewSessionHint           MsgKey = "new_session_hint"
 	MsgSessionClosingGraceful   MsgKey = "session_closing_graceful"
 
 	MsgDeleteUsage              MsgKey = "delete_usage"
@@ -557,8 +556,9 @@ const (
 	MsgWsCloneFailed           MsgKey = "ws_clone_failed"
 
 	// Compact progress status lines (single auto-updating message).
-	MsgCompactThinking     MsgKey = "compact_thinking"
-	MsgCompactReading      MsgKey = "compact_reading"
+	MsgCompactThinking        MsgKey = "compact_thinking"
+	MsgCompactThinkingElapsed MsgKey = "compact_thinking_elapsed"
+	MsgCompactReading         MsgKey = "compact_reading"
 	MsgCompactEditing      MsgKey = "compact_editing"
 	MsgCompactWriting      MsgKey = "compact_writing"
 	MsgCompactRunning      MsgKey = "compact_running"
@@ -631,11 +631,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "fallido",
 	},
 	MsgExecutionStopped: {
-		LangEnglish:            "⏹ Execution stopped.",
-		LangChinese:            "⏹ 执行已停止。",
-		LangTraditionalChinese: "⏹ 執行已停止。",
-		LangJapanese:           "⏹ 実行を停止しました。",
-		LangSpanish:            "⏹ Ejecución detenida.",
+		LangEnglish:            "⏹",
+		LangChinese:            "⏹",
+		LangTraditionalChinese: "⏹",
+		LangJapanese:           "⏹",
+		LangSpanish:            "⏹",
 	},
 	MsgNoExecution: {
 		LangEnglish:            "No execution in progress.",
@@ -2717,18 +2717,18 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Uso:\n  `/alias` — listar aliases\n  `/alias add <trigger> <comando>` — añadir alias\n  `/alias del <trigger>` — eliminar alias\n\nEjemplo: `/alias add ayuda /help`",
 	},
 	MsgNewSessionCreated: {
-		LangEnglish:            "✅ New session created",
-		LangChinese:            "✅ 新会话已创建",
-		LangTraditionalChinese: "✅ 新會話已建立",
-		LangJapanese:           "✅ 新しいセッションを作成しました",
-		LangSpanish:            "✅ Nueva sesión creada",
+		LangEnglish:            "✅",
+		LangChinese:            "✅",
+		LangTraditionalChinese: "✅",
+		LangJapanese:           "✅",
+		LangSpanish:            "✅",
 	},
 	MsgNewSessionCreatedName: {
-		LangEnglish:            "✅ New session created: **%s**",
-		LangChinese:            "✅ 新会话已创建：**%s**",
-		LangTraditionalChinese: "✅ 新會話已建立：**%s**",
-		LangJapanese:           "✅ 新しいセッションを作成しました：**%s**",
-		LangSpanish:            "✅ Nueva sesión creada: **%s**",
+		LangEnglish:            "✅",
+		LangChinese:            "✅",
+		LangTraditionalChinese: "✅",
+		LangJapanese:           "✅",
+		LangSpanish:            "✅",
 	},
 	MsgSessionAutoResetIdle: {
 		LangEnglish:            "⏰ Session auto-reset after %d minute(s) of inactivity.",
@@ -2736,13 +2736,6 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "⏰ 因閒置超過 %d 分鐘，已自動切換到新會話。",
 		LangJapanese:           "⏰ %d 分以上操作がなかったため、新しいセッションに自動切り替えました。",
 		LangSpanish:            "⏰ La sesión se reinició automáticamente tras %d minuto(s) de inactividad.",
-	},
-	MsgNewSessionHint: {
-		LangEnglish:            `💡 It's been a while — send "new session" to start fresh.`,
-		LangChinese:            `💡 已经有一段时间了——发送 "new session" 开始新会话。`,
-		LangTraditionalChinese: `💡 已經有一段時間了——傳送 "new session" 開始新會話。`,
-		LangJapanese:           `💡 しばらく経ちました——"new session" で新しいセッションを開始できます。`,
-		LangSpanish:            `💡 Ha pasado un rato — envía "new session" para empezar de nuevo.`,
 	},
 	MsgSessionClosingGraceful: {
 		LangEnglish:            "⏳ Wrapping up your previous session (usually a few seconds, up to 2 minutes). Your new session will start automatically.",
@@ -3741,6 +3734,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "💭 思考中…",
 		LangJapanese:           "💭 考え中…",
 		LangSpanish:            "💭 Pensando…",
+	},
+	MsgCompactThinkingElapsed: {
+		LangEnglish:            "💭 Thinking for %s",
+		LangChinese:            "💭 思考了 %s",
+		LangTraditionalChinese: "💭 思考了 %s",
+		LangJapanese:           "💭 %s 思考中",
+		LangSpanish:            "💭 Pensando %s",
 	},
 	MsgCompactReading: {
 		LangEnglish:            "📖 Reading %s",

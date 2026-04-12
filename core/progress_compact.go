@@ -14,7 +14,7 @@ import (
 
 // compactStatusMaxLen caps the total rendered status line so it stays on a
 // single line and the chat below does not jump up/down on each update.
-const compactStatusMaxLen = 50
+const compactStatusMaxLen = 200
 
 const (
 	progressStyleLegacy  = "legacy"
@@ -230,6 +230,8 @@ type compactProgressWriter struct {
 	style      string
 	usePayload bool
 
+	workDir string // stripped from tool-use paths for display
+
 	mu             sync.Mutex
 	content        string
 	baseContent    string // content without stop hint, used for final update
@@ -241,9 +243,12 @@ type compactProgressWriter struct {
 	truncated      bool
 	lastSent       string
 	maxEntries     int
-	toolStartAt    time.Time  // when current tool_use started
-	toolBaseStatus string     // rendered status without elapsed/hint
+	toolStartAt    time.Time             // when current tool_use/thinking started
+	toolBaseStatus string                // rendered status without elapsed/hint
+	activeKind     ProgressCardEntryKind // kind of the current active line
+	frozenLines    []string              // completed progress lines with frozen elapsed
 	tickerStop     chan struct{}
+	usageSuffix    string // usage indicator to include in final progress card
 }
 
 func normalizeProgressStyle(style string) string {
@@ -280,7 +285,7 @@ func SuppressStandaloneToolResultEvent(p Platform) bool {
 	return progressStyleForPlatform(p) == progressStyleLegacy
 }
 
-func newCompactProgressWriter(ctx context.Context, p Platform, replyCtx any, agentName string, lang Language, transform func(string) string) *compactProgressWriter {
+func newCompactProgressWriter(ctx context.Context, p Platform, replyCtx any, agentName string, lang Language, transform func(string) string, workDir string) *compactProgressWriter {
 	w := &compactProgressWriter{
 		ctx:        ctx,
 		platform:   p,
@@ -290,6 +295,7 @@ func newCompactProgressWriter(ctx context.Context, p Platform, replyCtx any, age
 		state:      ProgressCardStateRunning,
 		agentName:  normalizeProgressAgentLabel(agentName),
 		lang:       lang,
+		workDir:    workDir,
 		maxEntries: 10,
 	}
 	if w.style != progressStyleCompact && w.style != progressStyleCard {
@@ -385,6 +391,10 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 			text = w.transform(text)
 			fallback = w.transform(fallback)
 		}
+	case ProgressEntryToolUse:
+		if w.workDir != "" {
+			text = stripWorkDirPrefix(text, w.workDir)
+		}
 	}
 	kind := item.Kind
 	if kind == "" {
@@ -424,45 +434,43 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 		}
 	default:
 		// ── compact style ──
-		// Show only the latest entry so the message stays short on
-		// platforms like Slack where compact progress is a single
-		// auto-updating message. Use a friendly one-liner when possible.
+		// Accumulate all progress events as lines in a single code block.
+		// Freeze the current active line (with elapsed) before starting a new one.
 		w.stopTickerLocked()
+		w.freezeActiveLocked()
 
-		if friendly := renderCompactStatus(item, w.lang); friendly != "" {
-			w.content = friendly
-		} else if item.Kind == ProgressEntryToolResult {
-			// Tool completed: freeze elapsed time, strip stop hint.
-			if !w.toolStartAt.IsZero() && w.toolBaseStatus != "" {
-				w.baseContent = w.toolBaseStatus + " · " + formatElapsed(time.Since(w.toolStartAt))
-				w.content = w.baseContent
-				w.toolStartAt = time.Time{}
-				w.toolBaseStatus = ""
-				break // fall through to send update below
-			}
-			// No elapsed tracking — keep showing the last tool-use status.
-			return true
-		} else {
-			w.content = fallback
+		if item.Kind == ProgressEntryToolResult {
+			// Tool completed — the active line was already frozen above.
+			w.content = w.buildCompactBlock("")
+			break // fall through to send update below
 		}
 
-		w.baseContent = w.content
+		// Build the new active line.
+		var activeLine string
+		if friendly := renderCompactStatus(item, w.lang); friendly != "" {
+			activeLine = friendly
+		} else {
+			activeLine = fallback
+		}
 
-		if item.Kind == ProgressEntryToolUse {
-			// Track tool start for elapsed display; stop hint deferred to ticker.
+		w.baseContent = activeLine
+		w.activeKind = item.Kind
+
+		if item.Kind == ProgressEntryToolUse || item.Kind == ProgressEntryThinking {
+			// Timed events: elapsed + stop hint are deferred to the ticker.
 			w.toolStartAt = time.Now()
-			w.toolBaseStatus = w.content
+			w.toolBaseStatus = activeLine
 			w.startToolTickerLocked()
 		} else {
-			// Non-tool event: clear tool tracking, show stop hint immediately.
+			// Non-timed events: show stop hint immediately on the active line.
 			w.toolStartAt = time.Time{}
 			w.toolBaseStatus = ""
-			if w.content != "" {
-				if hint := translateMsg(w.lang, MsgCompactStopHint); hint != "" {
-					w.content += " · " + hint
-				}
+			if hint := translateMsg(w.lang, MsgCompactStopHint); hint != "" {
+				activeLine += " · " + hint
 			}
 		}
+
+		w.content = w.buildCompactBlock(activeLine)
 	}
 
 	if w.content == w.lastSent {
@@ -508,6 +516,54 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 	return true
 }
 
+// SetUsage stores token usage stats to include in the final compact progress card.
+func (w *compactProgressWriter) SetUsage(totalInput, outputTokens, contextTokens int, duration time.Duration) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.style != progressStyleCompact || !w.enabled || w.failed {
+		return
+	}
+	w.usageSuffix = usageIndicatorCompact(totalInput, outputTokens, contextTokens, duration)
+}
+
+// UsageHandled returns true when the compact progress card includes the usage indicator,
+// so the caller can skip appending it to the response text.
+func (w *compactProgressWriter) UsageHandled() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.style == progressStyleCompact && w.enabled && !w.failed && w.handle != nil && w.usageSuffix != ""
+}
+
+// usageIndicatorCompact returns an inline usage string like "[23s · 65.6k in · 461 out · ctx ~6%]"
+// without the leading newline (for embedding in progress card).
+func usageIndicatorCompact(totalInput, outputTokens, contextTokens int, duration time.Duration) string {
+	var parts []string
+	if duration >= time.Second {
+		parts = append(parts, formatDuration(duration))
+	}
+	if totalInput > 0 {
+		parts = append(parts, formatTokenCount(totalInput)+" in")
+	}
+	if outputTokens > 0 {
+		parts = append(parts, formatTokenCount(outputTokens)+" out")
+	}
+	ctxBasis := contextTokens
+	if ctxBasis <= 0 {
+		ctxBasis = totalInput
+	}
+	if ctxBasis >= 100 {
+		pct := ctxBasis * 100 / modelContextWindow
+		if pct > 100 {
+			pct = 100
+		}
+		parts = append(parts, fmt.Sprintf("ctx ~%d%%", pct))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "[" + strings.Join(parts, " · ") + "]"
+}
+
 // Finalize updates card progress state (running/completed/failed) without
 // appending a new progress entry.
 func (w *compactProgressWriter) Finalize(state ProgressCardState) bool {
@@ -517,17 +573,19 @@ func (w *compactProgressWriter) Finalize(state ProgressCardState) bool {
 	if !w.enabled || w.failed || w.handle == nil {
 		return false
 	}
-	// Compact style: strip the stop hint on completion so it doesn't linger.
+	// Compact style: freeze the active line, add usage indicator, render final block.
 	if w.style != progressStyleCard {
-		if w.baseContent != "" && w.baseContent != w.lastSent {
+		w.freezeActiveLocked()
+		final := w.buildCompactBlock("")
+		if final != w.lastSent && final != "" {
 			callCtx, cancel := w.withAPITimeout()
-			err := w.updater.UpdateMessage(callCtx, w.handle, w.baseContent)
+			err := w.updater.UpdateMessage(callCtx, w.handle, final)
 			cancel()
 			if err != nil {
 				slog.Warn("progress writer: Finalize compact UpdateMessage failed", "platform", w.platform.Name(), "error", err)
 			} else {
-				w.lastSent = w.baseContent
-				w.content = w.baseContent
+				w.lastSent = final
+				w.content = final
 			}
 		}
 		return true
@@ -644,6 +702,14 @@ func renderCompactToolUse(tool, input string, lang Language) string {
 	return fmt.Sprintf(tmpl, brief)
 }
 
+// stripWorkDirPrefix replaces an absolute workDir prefix in s with a relative
+// path. For example "/Users/x/project/src/main.go" → "src/main.go" when
+// workDir is "/Users/x/project".
+func stripWorkDirPrefix(s, workDir string) string {
+	prefix := workDir + "/"
+	return strings.ReplaceAll(s, prefix, "")
+}
+
 // compactInputBrief extracts a short one-line summary from tool input.
 func compactInputBrief(input string, maxLen int) string {
 	input = strings.TrimSpace(input)
@@ -678,6 +744,63 @@ func translateMsg(lang Language, key MsgKey) string {
 		}
 	}
 	return string(key)
+}
+
+// freezeActiveLocked freezes the current active line (with its final elapsed
+// time) into frozenLines. Must be called while w.mu is held.
+func (w *compactProgressWriter) freezeActiveLocked() {
+	if w.baseContent == "" {
+		return
+	}
+	frozen := w.baseContent
+	if !w.toolStartAt.IsZero() {
+		frozen = w.renderActiveWithElapsed(time.Since(w.toolStartAt))
+	}
+	w.frozenLines = append(w.frozenLines, frozen)
+	// Cap frozen lines to maxEntries.
+	if w.maxEntries > 0 && len(w.frozenLines) > w.maxEntries {
+		w.frozenLines = w.frozenLines[len(w.frozenLines)-w.maxEntries:]
+	}
+	w.toolStartAt = time.Time{}
+	w.toolBaseStatus = ""
+	w.activeKind = ""
+	w.baseContent = ""
+}
+
+// renderActiveWithElapsed returns the active line with an elapsed-time suffix.
+// For thinking events: "💭 Thinking for 5s"; for tools: "📖 Reading xyz · 5s".
+func (w *compactProgressWriter) renderActiveWithElapsed(elapsed time.Duration) string {
+	es := formatElapsed(elapsed)
+	if w.activeKind == ProgressEntryThinking {
+		return fmt.Sprintf(translateMsg(w.lang, MsgCompactThinkingElapsed), es)
+	}
+	return w.toolBaseStatus + " · " + es
+}
+
+// buildCompactBlock assembles all frozen lines + the active line (if any) +
+// usage suffix into a single code block for Slack rendering.
+func (w *compactProgressWriter) buildCompactBlock(activeLine string) string {
+	var lines []string
+	lines = append(lines, w.frozenLines...)
+	if activeLine != "" {
+		lines = append(lines, activeLine)
+	}
+	if w.usageSuffix != "" {
+		lines = append(lines, w.usageSuffix)
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	body := strings.Join(lines, "\n")
+	return "```\n" + body + "\n```"
+}
+
+// wrapCompact wraps content in a code block for compact style rendering.
+func (w *compactProgressWriter) wrapCompact(s string) string {
+	if s == "" {
+		return ""
+	}
+	return "```\n" + s + "\n```"
 }
 
 // formatElapsed returns a short human-readable duration like "5s" or "2m13s".
@@ -729,14 +852,13 @@ func (w *compactProgressWriter) refreshToolElapsed() {
 		return
 	}
 	elapsed := time.Since(w.toolStartAt)
-	content := w.toolBaseStatus + " · " + formatElapsed(elapsed)
-	w.baseContent = content
+	activeLine := w.renderActiveWithElapsed(elapsed)
 	if elapsed >= compactStopHintDelay {
 		if hint := translateMsg(w.lang, MsgCompactStopHint); hint != "" {
-			content += " · " + hint
+			activeLine += " · " + hint
 		}
 	}
-	w.content = content
+	w.content = w.buildCompactBlock(activeLine)
 	if w.content == w.lastSent {
 		return
 	}

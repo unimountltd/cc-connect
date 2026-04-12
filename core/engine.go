@@ -247,6 +247,7 @@ type queuedMessage struct {
 	files         []FileAttachment
 	fromVoice     bool
 	userID        string
+	userName      string // sender's display name for sender injection
 	msgPlatform   string // platform name for sender injection
 	msgSessionKey string // session key for extracting chat ID
 }
@@ -1478,6 +1479,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	// shortcuts for /stop and /new. This lets users on platforms like Slack
 	// (where "/" is intercepted as a slash command) use these commands.
 	if len(msg.Images) == 0 {
+		slog.Info("bare command check", "content", content, "content_len", len(content), "content_bytes", fmt.Sprintf("%q", content))
 		switch {
 		case strings.EqualFold(content, "stop"):
 			content = "/stop"
@@ -1550,8 +1552,6 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 
 	if rotated := e.maybeAutoResetSessionOnIdle(p, msg, sessions, interactiveKey, session); rotated != nil {
 		session = rotated
-	} else {
-		e.maybeSuggestNewSession(p, msg, session)
 	}
 
 	// Ensure an interactiveState entry exists before launching the async
@@ -1618,24 +1618,6 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 	return newSession
 }
 
-const newSessionHintIdleThreshold = 4 * time.Hour
-
-// maybeSuggestNewSession sends a one-time hint suggesting the user start a
-// new session when the current one has been idle for 4+ hours. Unlike
-// maybeAutoResetSessionOnIdle this does not reset anything — it just nudges.
-func (e *Engine) maybeSuggestNewSession(p Platform, msg *Message, session *Session) {
-	if session == nil {
-		return
-	}
-	if len(session.GetHistory(1)) == 0 {
-		return
-	}
-	lastActive := session.GetUpdatedAt()
-	if lastActive.IsZero() || time.Since(lastActive) < newSessionHintIdleThreshold {
-		return
-	}
-	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNewSessionHint))
-}
 
 // queueMessageForBusySession queues a message for later delivery when the
 // session is busy. The message is NOT sent to agent stdin at queue time;
@@ -1673,6 +1655,7 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		files:         msg.Files,
 		fromVoice:     msg.FromVoice,
 		userID:        msg.UserID,
+		userName:      msg.UserName,
 		msgPlatform:   msg.Platform,
 		msgSessionKey: msg.SessionKey,
 	})
@@ -2069,7 +2052,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		}
 	}()
 
-	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.Platform, msg.SessionKey)
+	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey)
 
 	// Retry loop: on retriable backend errors (429 rate limit, 529
 	// overloaded), wait and re-run the turn on a fresh agent session via
@@ -2522,7 +2505,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		return e.sendWithErrorForWorkspace(p, replyCtx, content, workspaceDir)
 	}
 	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx, workspaceRenderer)
-	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer)
+	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer, workspaceDir)
 	state.mu.Unlock()
 
 	// Idle timeout: 0 = disabled
@@ -2806,7 +2789,16 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventResult:
+			// Compute turn stats early so compact progress card can include them.
+			turnDuration := time.Since(turnStart)
+			totalInput := event.InputTokens + event.CacheCreationTokens + event.CacheReadTokens
+			sdkPlausible := totalInput >= 100
+
+			if e.showContextIndicator && sdkPlausible {
+				cp.SetUsage(totalInput, event.OutputTokens, event.ContextTokens, turnDuration)
+			}
 			cp.Finalize(ProgressCardStateCompleted)
+
 			if event.SessionID != "" {
 				session.SetAgentSessionID(event.SessionID, e.agent.Name())
 			}
@@ -2820,9 +2812,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 			// Context usage indicator: prefer SDK tokens, fall back to self-reported.
-			// Total input = non-cached + cache-created + cache-read (full context size).
-			totalInput := event.InputTokens + event.CacheCreationTokens + event.CacheReadTokens
-			sdkPlausible := totalInput >= 100
 			selfPct := parseSelfReportedCtx(fullResponse)
 			cleanResponse := ctxSelfReportRe.ReplaceAllString(fullResponse, "")
 			cleanResponse = strings.TrimRight(cleanResponse, "\n ")
@@ -2846,12 +2835,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			session.AddHistory("assistant", cleanResponse)
 			sessions.Save()
 
-			turnDuration := time.Since(turnStart)
-
+			// Skip usage suffix on response text when compact progress card handled it.
 			var usageSuffix string
-			if e.showContextIndicator {
+			if e.showContextIndicator && !cp.UsageHandled() {
 				if sdkPlausible {
-					usageSuffix = usageIndicator(totalInput, event.OutputTokens, turnDuration)
+					usageSuffix = usageIndicator(totalInput, event.OutputTokens, event.ContextTokens, turnDuration)
 				} else if selfPct > 0 {
 					usageSuffix = fmt.Sprintf("\n[ctx: ~%d%%]", selfPct)
 				}
@@ -2989,7 +2977,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 
-				queuedPrompt := e.buildSenderPrompt(queued.content, queued.userID, queued.msgPlatform, queued.msgSessionKey)
+				queuedPrompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey)
 
 				nextSend := make(chan error, 1)
 				go func() {
@@ -3012,7 +3000,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					return e.renderOutgoingContentForWorkspace(queued.platform, content, workspaceDir)
 				}
 				sp = newStreamPreview(e.streamPreview, queued.platform, queued.replyCtx, e.ctx, queuedRenderer)
-				cp = newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), queuedRenderer)
+				cp = newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), queuedRenderer, workspaceDir)
 
 				session.AddHistory("user", queued.content)
 
@@ -3153,7 +3141,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		state.mu.Unlock()
 
 		e.i18n.DetectAndSet(queued.content)
-		prompt := e.buildSenderPrompt(queued.content, queued.userID, queued.msgPlatform, queued.msgSessionKey)
+		prompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey)
 
 		if state.agentSession == nil || !state.agentSession.Alive() {
 			e.send(queued.platform, queued.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session ended"))
@@ -3706,8 +3694,11 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 		name = strings.Join(args, " ")
 	}
 	sessions.NewSession(msg.SessionKey, name)
-	if name != "" {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgNewSessionCreatedName), name))
+	if er, ok := p.(EmojiReactor); ok {
+		if err := er.AddReaction(e.ctx, msg.ReplyCtx, "white_check_mark"); err != nil {
+			slog.Debug("react failed, falling back to text reply", "error", err)
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNewSessionCreated))
+		}
 	} else {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNewSessionCreated))
 	}
@@ -5835,11 +5826,27 @@ func (e *Engine) cmdTTS(p Platform, msg *Message, args []string) {
 
 func (e *Engine) cmdStop(p Platform, msg *Message) {
 	iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
-	if !e.stopInteractiveSession(iKey, p, msg.ReplyCtx) {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNoExecution))
-		return
+	stopped := e.stopInteractiveSession(iKey, p, msg.ReplyCtx)
+	if er, ok := p.(EmojiReactor); ok {
+		emoji := "white_check_mark"
+		if !stopped {
+			emoji = "thumbsup"
+		}
+		if err := er.AddReaction(e.ctx, msg.ReplyCtx, emoji); err != nil {
+			slog.Debug("react failed, falling back to text reply", "error", err)
+			if stopped {
+				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
+			} else {
+				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNoExecution))
+			}
+		}
+	} else {
+		if stopped {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
+		} else {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNoExecution))
+		}
 	}
-	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
 }
 
 func (e *Engine) stopInteractiveSession(sessionKey string, quietPlatform Platform, quietReplyCtx any) bool {
@@ -10336,11 +10343,14 @@ func (e *Engine) cmdBindSetup(p Platform, msg *Message) {
 
 // buildSenderPrompt prepends a sender identity header to content when
 // injectSender is enabled and userID is non-empty.
-func (e *Engine) buildSenderPrompt(content, userID, platform, sessionKey string) string {
+func (e *Engine) buildSenderPrompt(content, userID, userName, platform, sessionKey string) string {
 	if !e.injectSender || userID == "" {
 		return content
 	}
 	chatID := extractChannelID(sessionKey)
+	if userName != "" {
+		return fmt.Sprintf("[cc-connect sender_id=%s sender_name=\"%s\" platform=%s chat_id=%s]\n%s", userID, userName, platform, chatID, content)
+	}
 	return fmt.Sprintf("[cc-connect sender_id=%s platform=%s chat_id=%s]\n%s", userID, platform, chatID, content)
 }
 
@@ -10656,9 +10666,10 @@ func gitClone(repoURL, dest string) error {
 const modelContextWindow = 1_000_000 // Claude's context window size in tokens (1M for Opus/Sonnet 4.6)
 
 // usageIndicator returns a suffix like "\n[45s · 12.3k in · 8.5k out · ctx ~4%]".
-// totalInput is the full context size (input + cache creation + cache read tokens).
-// Parts are omitted when their value is zero/unavailable.
-func usageIndicator(totalInput, outputTokens int, duration time.Duration) string {
+// totalInput is the cumulative token count across all API calls in the turn.
+// contextTokens is the last API request's total input (actual context size);
+// when > 0 it is used for ctx%, otherwise totalInput is used as-is.
+func usageIndicator(totalInput, outputTokens, contextTokens int, duration time.Duration) string {
 	var parts []string
 	if duration >= time.Second {
 		parts = append(parts, formatDuration(duration))
@@ -10669,8 +10680,12 @@ func usageIndicator(totalInput, outputTokens int, duration time.Duration) string
 	if outputTokens > 0 {
 		parts = append(parts, formatTokenCount(outputTokens)+" out")
 	}
-	if totalInput >= 100 {
-		pct := totalInput * 100 / modelContextWindow
+	ctxBasis := contextTokens
+	if ctxBasis <= 0 {
+		ctxBasis = totalInput
+	}
+	if ctxBasis >= 100 {
+		pct := ctxBasis * 100 / modelContextWindow
 		if pct > 100 {
 			pct = 100
 		}

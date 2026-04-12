@@ -217,6 +217,7 @@ type Event struct {
 	CacheCreationTokens    int       // tokens written to prompt cache
 	CacheReadTokens        int       // tokens read from prompt cache
 	OutputTokens           int       // output tokens (thinking + response text)
+	ContextTokens          int       // last API request's total input tokens (for ctx% estimate)
 }
 
 // HistoryEntry is one turn in a conversation.

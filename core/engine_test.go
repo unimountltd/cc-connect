@@ -6885,7 +6885,7 @@ func TestBareNewSession_ShortCircuitsToNewCommand(t *testing.T) {
 		sent := p.getSent()
 		found := false
 		for _, s := range sent {
-			if strings.Contains(s, "New session") || strings.Contains(s, "new session") || strings.Contains(s, "✨") {
+			if strings.Contains(s, "✅") {
 				found = true
 				break
 			}
@@ -6909,7 +6909,7 @@ func TestBareNewSession_ShortCircuitsToNewCommand(t *testing.T) {
 
 func TestCompactProgress_ToolUseDefersStopHint(t *testing.T) {
 	p := &stubCompactProgressPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
-	w := newCompactProgressWriter(context.Background(), p, "ctx", "claudecode", LangEnglish, nil)
+	w := newCompactProgressWriter(context.Background(), p, "ctx", "claudecode", LangEnglish, nil, "")
 
 	ok := w.AppendEvent(ProgressEntryToolUse, "Reading file", "Read", "Reading file")
 	if !ok {
@@ -6929,9 +6929,10 @@ func TestCompactProgress_ToolUseDefersStopHint(t *testing.T) {
 
 func TestCompactProgress_NonToolIncludesStopHint(t *testing.T) {
 	p := &stubCompactProgressPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
-	w := newCompactProgressWriter(context.Background(), p, "ctx", "claudecode", LangEnglish, nil)
+	w := newCompactProgressWriter(context.Background(), p, "ctx", "claudecode", LangEnglish, nil, "")
 
-	ok := w.AppendEvent(ProgressEntryThinking, "Planning approach", "", "💭 Thinking…")
+	// Use an info event (non-tool, non-thinking) which includes the stop hint immediately.
+	ok := w.AppendEvent(ProgressEntryInfo, "some info", "", "some info")
 	if !ok {
 		t.Fatal("AppendEvent should succeed for compact writer")
 	}
@@ -6942,7 +6943,31 @@ func TestCompactProgress_NonToolIncludesStopHint(t *testing.T) {
 	}
 	hint := `send "stop" to abort`
 	if !strings.Contains(starts[0], hint) {
-		t.Fatalf("compact progress should contain stop hint for non-tool events, got %q", starts[0])
+		t.Fatalf("compact progress should contain stop hint for non-tool/thinking events, got %q", starts[0])
+	}
+}
+
+func TestCompactProgress_ThinkingDefersStopHint(t *testing.T) {
+	p := &stubCompactProgressPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	w := newCompactProgressWriter(context.Background(), p, "ctx", "claudecode", LangEnglish, nil, "")
+
+	ok := w.AppendEvent(ProgressEntryThinking, "Planning approach", "", "💭 Thinking…")
+	if !ok {
+		t.Fatal("AppendEvent should succeed for compact writer")
+	}
+
+	starts := p.getPreviewStarts()
+	if len(starts) == 0 {
+		t.Fatal("expected at least one preview start")
+	}
+	// Thinking events now defer the stop hint to the ticker (like tool events).
+	hint := `send "stop" to abort`
+	if strings.Contains(starts[0], hint) {
+		t.Fatalf("thinking should defer stop hint to ticker, but got immediate hint in %q", starts[0])
+	}
+	// Should be wrapped in code block.
+	if !strings.HasPrefix(starts[0], "```\n") {
+		t.Fatalf("compact progress should be wrapped in code block, got %q", starts[0])
 	}
 }
 
@@ -6951,7 +6976,7 @@ func TestCardProgress_DoesNotIncludeStopHint(t *testing.T) {
 		stubPlatformEngine: stubPlatformEngine{n: "test"},
 		style:              "card",
 	}
-	w := newCompactProgressWriter(context.Background(), p, "ctx", "claudecode", LangEnglish, nil)
+	w := newCompactProgressWriter(context.Background(), p, "ctx", "claudecode", LangEnglish, nil, "")
 
 	ok := w.AppendEvent(ProgressEntryToolUse, "Reading file", "Read", "Reading file")
 	if !ok {
@@ -6970,10 +6995,10 @@ func TestCardProgress_DoesNotIncludeStopHint(t *testing.T) {
 
 func TestCompactProgress_FinalizeStripsHint(t *testing.T) {
 	p := &stubCompactProgressPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
-	w := newCompactProgressWriter(context.Background(), p, "ctx", "claudecode", LangEnglish, nil)
+	w := newCompactProgressWriter(context.Background(), p, "ctx", "claudecode", LangEnglish, nil, "")
 
-	// Use a thinking event which includes the stop hint immediately.
-	w.AppendEvent(ProgressEntryThinking, "Planning", "", "💭 Thinking…")
+	// Use an info event which includes the stop hint immediately.
+	w.AppendEvent(ProgressEntryInfo, "Processing", "", "Processing")
 
 	hint := `send "stop" to abort`
 	starts := p.getPreviewStarts()
@@ -6993,6 +7018,10 @@ func TestCompactProgress_FinalizeStripsHint(t *testing.T) {
 	}
 	if lastEdit == "" {
 		t.Fatal("finalized content should not be empty")
+	}
+	// Should be wrapped in code block.
+	if !strings.HasPrefix(lastEdit, "```\n") {
+		t.Fatalf("finalized compact progress should be wrapped in code block, got %q", lastEdit)
 	}
 }
 
@@ -7103,8 +7132,8 @@ func TestBuildSenderPrompt_Enabled(t *testing.T) {
 	e := newTestEngine()
 	e.SetInjectSender(true)
 
-	result := e.buildSenderPrompt("hello world", "user123", "feishu", "feishu:channel42:user123")
-	expected := "[cc-connect sender_id=user123 platform=feishu chat_id=channel42]\nhello world"
+	result := e.buildSenderPrompt("hello world", "user123", "Alice", "feishu", "feishu:channel42:user123")
+	expected := "[cc-connect sender_id=user123 sender_name=\"Alice\" platform=feishu chat_id=channel42]\nhello world"
 	if result != expected {
 		t.Fatalf("got %q, want %q", result, expected)
 	}
@@ -7114,7 +7143,7 @@ func TestBuildSenderPrompt_Disabled(t *testing.T) {
 	e := newTestEngine()
 	e.SetInjectSender(false)
 
-	result := e.buildSenderPrompt("hello", "user1", "feishu", "feishu:ch:user1")
+	result := e.buildSenderPrompt("hello", "user1", "Alice", "feishu", "feishu:ch:user1")
 	if result != "hello" {
 		t.Fatalf("expected raw content when disabled, got %q", result)
 	}
@@ -7124,9 +7153,31 @@ func TestBuildSenderPrompt_EmptyUserID(t *testing.T) {
 	e := newTestEngine()
 	e.SetInjectSender(true)
 
-	result := e.buildSenderPrompt("hello", "", "telegram", "telegram:ch:user1")
+	result := e.buildSenderPrompt("hello", "", "Bob", "telegram", "telegram:ch:user1")
 	if result != "hello" {
 		t.Fatalf("expected raw content when userID is empty, got %q", result)
+	}
+}
+
+func TestBuildSenderPrompt_EmptyUserName(t *testing.T) {
+	e := newTestEngine()
+	e.SetInjectSender(true)
+
+	result := e.buildSenderPrompt("hello", "user1", "", "feishu", "feishu:ch:user1")
+	expected := "[cc-connect sender_id=user1 platform=feishu chat_id=ch]\nhello"
+	if result != expected {
+		t.Fatalf("got %q, want %q", result, expected)
+	}
+}
+
+func TestBuildSenderPrompt_NameWithSpaces(t *testing.T) {
+	e := newTestEngine()
+	e.SetInjectSender(true)
+
+	result := e.buildSenderPrompt("hi", "U999", "Jim Tang", "slack", "slack:C012:U999")
+	expected := "[cc-connect sender_id=U999 sender_name=\"Jim Tang\" platform=slack chat_id=C012]\nhi"
+	if result != expected {
+		t.Fatalf("got %q, want %q", result, expected)
 	}
 }
 
@@ -7163,7 +7214,7 @@ func TestBuildSenderPrompt_DifferentPlatforms(t *testing.T) {
 		{"slack", "slack:C012345:carol", "C012345"},
 	}
 	for _, tc := range platforms {
-		result := e.buildSenderPrompt("msg", "uid", tc.platform, tc.sessionKey)
+		result := e.buildSenderPrompt("msg", "uid", "TestUser", tc.platform, tc.sessionKey)
 		if !strings.Contains(result, "platform="+tc.platform) {
 			t.Errorf("missing platform=%s in %q", tc.platform, result)
 		}

@@ -37,6 +37,7 @@ type claudeSession struct {
 	autoApprove     atomic.Bool
 	acceptEditsOnly atomic.Bool
 	dontAsk         atomic.Bool
+	lastCtxTokens   atomic.Int64 // last API request's total input tokens (for ctx%)
 	workDir         string
 	ctx             context.Context
 	cancel          context.CancelFunc
@@ -252,6 +253,22 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 	if !ok {
 		return
 	}
+	// Track per-request usage for ctx% (last API call's input is the actual context size).
+	if usage, ok := msg["usage"].(map[string]any); ok {
+		var total int64
+		if v, ok := usage["input_tokens"].(float64); ok {
+			total += int64(v)
+		}
+		if v, ok := usage["cache_creation_input_tokens"].(float64); ok {
+			total += int64(v)
+		}
+		if v, ok := usage["cache_read_input_tokens"].(float64); ok {
+			total += int64(v)
+		}
+		if total > 0 {
+			cs.lastCtxTokens.Store(total)
+		}
+	}
 	contentArr, ok := msg["content"].([]any)
 	if !ok {
 		return
@@ -383,6 +400,7 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 		CacheCreationTokens: cacheCreation,
 		CacheReadTokens:     cacheRead,
 		OutputTokens:        outputTokens,
+		ContextTokens:       int(cs.lastCtxTokens.Load()),
 	}
 	select {
 	case cs.events <- evt:

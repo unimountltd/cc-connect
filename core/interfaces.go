@@ -138,6 +138,12 @@ type CompletionReactor interface {
 	ReactCompletion(ctx context.Context, replyCtx any, success bool)
 }
 
+// EmojiReactor is an optional interface for platforms that can add an emoji
+// reaction to a user's message (as opposed to replying with text).
+type EmojiReactor interface {
+	AddReaction(ctx context.Context, replyCtx any, emoji string) error
+}
+
 // ImageSender is an optional interface for platforms that support sending images.
 type ImageSender interface {
 	SendImage(ctx context.Context, replyCtx any, img ImageAttachment) error

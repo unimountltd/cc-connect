@@ -206,6 +206,27 @@ Available tags: `no_acp`, `no_claudecode`, `no_codex`, `no_cursor`, `no_gemini`,
 `no_discord`, `no_slack`, `no_dingtalk`, `no_wecom`, `no_weixin`, `no_qq`, `no_qqbot`,
 `no_line`.
 
+## Build & Deploy (Local)
+
+```bash
+# Build
+make build
+
+# Install to system path
+cp cc-connect /opt/homebrew/bin/cc-connect
+
+# Kill the running process — launchd auto-restarts it with the new binary
+pkill -x cc-connect
+```
+
+The daemon is managed via `cc-connect daemon start` (installs and starts a
+launchd service). The launchd `KeepAlive` policy auto-restarts the process on
+exit, so `pkill -x cc-connect` is the simplest way to pick up a new binary.
+Use `pkill -x` (not `pkill -f`) to avoid killing shells or editors that have
+"cc-connect" in their command line.
+
+Config lives at `~/.cc-connect/config.toml`.
+
 ## Pre-Commit Checklist
 
 1. **Build passes**: `go build ./...`

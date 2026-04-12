@@ -705,6 +705,16 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 	}
 }
 
+// AddReaction adds an emoji reaction to the user's message.
+func (p *Platform) AddReaction(_ context.Context, rctx any, emoji string) error {
+	rc, ok := rctx.(replyContext)
+	if !ok || rc.channel == "" || rc.timestamp == "" {
+		return fmt.Errorf("slack: invalid reply context for reaction")
+	}
+	ref := slack.ItemRef{Channel: rc.channel, Timestamp: rc.timestamp}
+	return p.client.AddReaction(emoji, ref)
+}
+
 // ReactCompletion adds a persistent emoji reaction indicating the outcome of
 // a turn: checkered_flag for success, woman-raising-hand for problems.
 func (p *Platform) ReactCompletion(_ context.Context, rctx any, success bool) {
