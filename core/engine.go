@@ -2820,7 +2820,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 			// Context usage indicator: prefer SDK tokens, fall back to self-reported.
-			sdkPlausible := event.InputTokens >= 100
+			// Total input = non-cached + cache-created + cache-read (full context size).
+			totalInput := event.InputTokens + event.CacheCreationTokens + event.CacheReadTokens
+			sdkPlausible := totalInput >= 100
 			selfPct := parseSelfReportedCtx(fullResponse)
 			cleanResponse := ctxSelfReportRe.ReplaceAllString(fullResponse, "")
 			cleanResponse = strings.TrimRight(cleanResponse, "\n ")
@@ -2844,16 +2846,18 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			session.AddHistory("assistant", cleanResponse)
 			sessions.Save()
 
+			turnDuration := time.Since(turnStart)
+
+			var usageSuffix string
 			if e.showContextIndicator {
 				if sdkPlausible {
-					cleanResponse += contextIndicator(event.InputTokens)
+					usageSuffix = usageIndicator(totalInput, event.OutputTokens, turnDuration)
 				} else if selfPct > 0 {
-					cleanResponse += fmt.Sprintf("\n[ctx: ~%d%%]", selfPct)
+					usageSuffix = fmt.Sprintf("\n[ctx: ~%d%%]", selfPct)
 				}
 			}
+			cleanResponse += usageSuffix
 			fullResponse = cleanResponse
-
-			turnDuration := time.Since(turnStart)
 			slog.Info("turn complete",
 				"session", session.ID,
 				"agent_session", session.GetAgentSessionID(),
@@ -2862,6 +2866,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				"response_len", len(fullResponse),
 				"turn_duration", turnDuration,
 				"input_tokens", event.InputTokens,
+				"cache_creation_tokens", event.CacheCreationTokens,
+				"cache_read_tokens", event.CacheReadTokens,
 				"output_tokens", event.OutputTokens,
 			)
 
@@ -2877,13 +2883,16 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// side-channel messages and segmentStart stays 0, so keep normal finalize flow.
 			if toolCount > 0 && segmentStart > 0 {
 				sp.discard()
+				unsent := ""
 				if segmentStart < len(textParts) {
-					unsent := strings.Join(textParts[segmentStart:], "")
-					if unsent != "" {
-						for _, chunk := range splitMessage(unsent, maxPlatformMessageLen) {
-							if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
-								return
-							}
+					unsent = strings.Join(textParts[segmentStart:], "")
+				}
+				unsent += usageSuffix
+				unsent = strings.TrimSpace(unsent)
+				if unsent != "" {
+					for _, chunk := range splitMessage(unsent, maxPlatformMessageLen) {
+						if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
+							return
 						}
 					}
 				}
@@ -10642,20 +10651,55 @@ func gitClone(repoURL, dest string) error {
 	return nil
 }
 
-// ── Context usage indicator ──────────────────────────────────
+// ── Usage indicator ──────────────────────────────────────────
 
-const modelContextWindow = 200_000 // Claude's context window size in tokens
+const modelContextWindow = 1_000_000 // Claude's context window size in tokens (1M for Opus/Sonnet 4.6)
 
-// contextIndicator returns a suffix like "\n[ctx: ~42%]" based on SDK-reported input tokens.
-func contextIndicator(inputTokens int) string {
-	if inputTokens <= 0 {
+// usageIndicator returns a suffix like "\n[45s · 12.3k in · 8.5k out · ctx ~4%]".
+// totalInput is the full context size (input + cache creation + cache read tokens).
+// Parts are omitted when their value is zero/unavailable.
+func usageIndicator(totalInput, outputTokens int, duration time.Duration) string {
+	var parts []string
+	if duration >= time.Second {
+		parts = append(parts, formatDuration(duration))
+	}
+	if totalInput > 0 {
+		parts = append(parts, formatTokenCount(totalInput)+" in")
+	}
+	if outputTokens > 0 {
+		parts = append(parts, formatTokenCount(outputTokens)+" out")
+	}
+	if totalInput >= 100 {
+		pct := totalInput * 100 / modelContextWindow
+		if pct > 100 {
+			pct = 100
+		}
+		parts = append(parts, fmt.Sprintf("ctx ~%d%%", pct))
+	}
+	if len(parts) == 0 {
 		return ""
 	}
-	pct := inputTokens * 100 / modelContextWindow
-	if pct > 100 {
-		pct = 100
+	return "\n[" + strings.Join(parts, " · ") + "]"
+}
+
+// formatTokenCount formats a token count for human display: 845, 1.2k, 12.3k, 123k, 1.2M.
+func formatTokenCount(n int) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fk", float64(n)/1_000)
+	default:
+		return strconv.Itoa(n)
 	}
-	return fmt.Sprintf("\n[ctx: ~%d%%]", pct)
+}
+
+// formatDuration formats a duration for human display: "45s", "2m15s".
+func formatDuration(d time.Duration) string {
+	if d >= time.Minute {
+		return fmt.Sprintf("%dm%ds", int(d.Minutes()), int(d.Seconds())%60)
+	}
+	return fmt.Sprintf("%ds", int(d.Seconds()))
 }
 
 // ctxSelfReportRe matches agent self-reported context lines like "[ctx: ~42%]".

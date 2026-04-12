@@ -358,10 +358,16 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 		return
 	}
 
-	var inputTokens, outputTokens int
+	var inputTokens, cacheCreation, cacheRead, outputTokens int
 	if usage, ok := raw["usage"].(map[string]any); ok {
 		if v, ok := usage["input_tokens"].(float64); ok {
 			inputTokens = int(v)
+		}
+		if v, ok := usage["cache_creation_input_tokens"].(float64); ok {
+			cacheCreation = int(v)
+		}
+		if v, ok := usage["cache_read_input_tokens"].(float64); ok {
+			cacheRead = int(v)
 		}
 		if v, ok := usage["output_tokens"].(float64); ok {
 			outputTokens = int(v)
@@ -369,12 +375,14 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 	}
 
 	evt := core.Event{
-		Type:         core.EventResult,
-		Content:      content,
-		SessionID:    cs.CurrentSessionID(),
-		Done:         true,
-		InputTokens:  inputTokens,
-		OutputTokens: outputTokens,
+		Type:                core.EventResult,
+		Content:             content,
+		SessionID:           cs.CurrentSessionID(),
+		Done:                true,
+		InputTokens:         inputTokens,
+		CacheCreationTokens: cacheCreation,
+		CacheReadTokens:     cacheRead,
+		OutputTokens:        outputTokens,
 	}
 	select {
 	case cs.events <- evt:

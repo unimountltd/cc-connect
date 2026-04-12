@@ -212,9 +212,11 @@ type Event struct {
 	Questions    []UserQuestion // populated when ToolName == "AskUserQuestion"
 	Done         bool
 	Error        error
-	ErrorKind    ErrorKind // structured classification for EventError (zero value = unknown)
-	InputTokens  int       // token usage from agent result events
-	OutputTokens int
+	ErrorKind              ErrorKind // structured classification for EventError (zero value = unknown)
+	InputTokens            int       // non-cached input tokens from agent result events
+	CacheCreationTokens    int       // tokens written to prompt cache
+	CacheReadTokens        int       // tokens read from prompt cache
+	OutputTokens           int       // output tokens (thinking + response text)
 }
 
 // HistoryEntry is one turn in a conversation.
