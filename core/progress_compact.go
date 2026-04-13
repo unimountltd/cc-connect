@@ -230,7 +230,8 @@ type compactProgressWriter struct {
 	style      string
 	usePayload bool
 
-	workDir string // stripped from tool-use paths for display
+	workDir      string // stripped from tool-use paths for display
+	injectHeader string // custom inject prompt shown at top of progress card
 
 	mu             sync.Mutex
 	content        string
@@ -285,18 +286,19 @@ func SuppressStandaloneToolResultEvent(p Platform) bool {
 	return progressStyleForPlatform(p) == progressStyleLegacy
 }
 
-func newCompactProgressWriter(ctx context.Context, p Platform, replyCtx any, agentName string, lang Language, transform func(string) string, workDir string) *compactProgressWriter {
+func newCompactProgressWriter(ctx context.Context, p Platform, replyCtx any, agentName string, lang Language, transform func(string) string, workDir string, injectHeader string) *compactProgressWriter {
 	w := &compactProgressWriter{
-		ctx:        ctx,
-		platform:   p,
-		replyCtx:   replyCtx,
-		transform:  transform,
-		style:      progressStyleForPlatform(p),
-		state:      ProgressCardStateRunning,
-		agentName:  normalizeProgressAgentLabel(agentName),
-		lang:       lang,
-		workDir:    workDir,
-		maxEntries: 10,
+		ctx:          ctx,
+		platform:     p,
+		replyCtx:     replyCtx,
+		transform:    transform,
+		style:        progressStyleForPlatform(p),
+		state:        ProgressCardStateRunning,
+		agentName:    normalizeProgressAgentLabel(agentName),
+		lang:         lang,
+		workDir:      workDir,
+		injectHeader: injectHeader,
+		maxEntries:   10,
 	}
 	if w.style != progressStyleCompact && w.style != progressStyleCard {
 		slog.Debug("progress writer disabled: unsupported style", "platform", p.Name(), "style", w.style)
@@ -781,6 +783,9 @@ func (w *compactProgressWriter) renderActiveWithElapsed(elapsed time.Duration) s
 // usage suffix into a single code block for Slack rendering.
 func (w *compactProgressWriter) buildCompactBlock(activeLine string) string {
 	var lines []string
+	if w.injectHeader != "" {
+		lines = append(lines, "📌 "+w.injectHeader)
+	}
 	lines = append(lines, w.frozenLines...)
 	if activeLine != "" {
 		lines = append(lines, activeLine)

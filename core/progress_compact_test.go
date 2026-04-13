@@ -124,7 +124,7 @@ func TestCompactProgressWriter_AppliesTransformToCardPayloadEntries(t *testing.T
 	}
 	w := newCompactProgressWriter(context.Background(), p, "ctx", "codex", LangEnglish, func(s string) string {
 		return strings.ReplaceAll(s, "/root/code/demo/src/app.ts:42", "📄 `src/app.ts:42`")
-	}, "")
+	}, "", "")
 
 	if ok := w.AppendStructured(ProgressCardEntry{
 		Kind: ProgressEntryThinking,
@@ -157,7 +157,7 @@ func TestCompactProgressWriter_DoesNotTransformToolResults(t *testing.T) {
 	}
 	w := newCompactProgressWriter(context.Background(), p, "ctx", "codex", LangEnglish, func(s string) string {
 		return strings.ReplaceAll(s, "/root/code/demo/src/app.ts:42", "📄 `src/app.ts:42`")
-	}, "")
+	}, "", "")
 
 	raw := "/root/code/demo/src/app.ts:42"
 	if ok := w.AppendStructured(ProgressCardEntry{

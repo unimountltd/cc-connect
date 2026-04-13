@@ -6909,7 +6909,7 @@ func TestBareNewSession_ShortCircuitsToNewCommand(t *testing.T) {
 
 func TestCompactProgress_ToolUseDefersStopHint(t *testing.T) {
 	p := &stubCompactProgressPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
-	w := newCompactProgressWriter(context.Background(), p, "ctx", "claudecode", LangEnglish, nil, "")
+	w := newCompactProgressWriter(context.Background(), p, "ctx", "claudecode", LangEnglish, nil, "", "")
 
 	ok := w.AppendEvent(ProgressEntryToolUse, "Reading file", "Read", "Reading file")
 	if !ok {
@@ -6929,7 +6929,7 @@ func TestCompactProgress_ToolUseDefersStopHint(t *testing.T) {
 
 func TestCompactProgress_NonToolIncludesStopHint(t *testing.T) {
 	p := &stubCompactProgressPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
-	w := newCompactProgressWriter(context.Background(), p, "ctx", "claudecode", LangEnglish, nil, "")
+	w := newCompactProgressWriter(context.Background(), p, "ctx", "claudecode", LangEnglish, nil, "", "")
 
 	// Use an info event (non-tool, non-thinking) which includes the stop hint immediately.
 	ok := w.AppendEvent(ProgressEntryInfo, "some info", "", "some info")
@@ -6949,7 +6949,7 @@ func TestCompactProgress_NonToolIncludesStopHint(t *testing.T) {
 
 func TestCompactProgress_ThinkingDefersStopHint(t *testing.T) {
 	p := &stubCompactProgressPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
-	w := newCompactProgressWriter(context.Background(), p, "ctx", "claudecode", LangEnglish, nil, "")
+	w := newCompactProgressWriter(context.Background(), p, "ctx", "claudecode", LangEnglish, nil, "", "")
 
 	ok := w.AppendEvent(ProgressEntryThinking, "Planning approach", "", "💭 Thinking…")
 	if !ok {
@@ -6976,7 +6976,7 @@ func TestCardProgress_DoesNotIncludeStopHint(t *testing.T) {
 		stubPlatformEngine: stubPlatformEngine{n: "test"},
 		style:              "card",
 	}
-	w := newCompactProgressWriter(context.Background(), p, "ctx", "claudecode", LangEnglish, nil, "")
+	w := newCompactProgressWriter(context.Background(), p, "ctx", "claudecode", LangEnglish, nil, "", "")
 
 	ok := w.AppendEvent(ProgressEntryToolUse, "Reading file", "Read", "Reading file")
 	if !ok {
@@ -6995,7 +6995,7 @@ func TestCardProgress_DoesNotIncludeStopHint(t *testing.T) {
 
 func TestCompactProgress_FinalizeStripsHint(t *testing.T) {
 	p := &stubCompactProgressPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
-	w := newCompactProgressWriter(context.Background(), p, "ctx", "claudecode", LangEnglish, nil, "")
+	w := newCompactProgressWriter(context.Background(), p, "ctx", "claudecode", LangEnglish, nil, "", "")
 
 	// Use an info event which includes the stop hint immediately.
 	w.AppendEvent(ProgressEntryInfo, "Processing", "", "Processing")

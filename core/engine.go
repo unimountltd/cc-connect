@@ -1478,6 +1478,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	// Bare "stop" and "new session" (case-insensitive, exact match) are
 	// shortcuts for /stop and /new. This lets users on platforms like Slack
 	// (where "/" is intercepted as a slash command) use these commands.
+	// "inject: ..." is a shortcut for /inject ... to set custom prompt injection.
 	if len(msg.Images) == 0 {
 		switch {
 		case strings.EqualFold(content, "stop"):
@@ -1485,6 +1486,9 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 			msg.Content = content
 		case strings.EqualFold(content, "new session"):
 			content = "/new"
+			msg.Content = content
+		case isInjectPrefix(content):
+			content = "/inject " + extractInjectText(content)
 			msg.Content = content
 		}
 	}
@@ -2052,6 +2056,9 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	}()
 
 	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey)
+	if inj := e.getInjectPrompt(msg.SessionKey); inj != "" {
+		promptContent += "\n\n[inject: " + inj + "]"
+	}
 
 	// Retry loop: on retriable backend errors (429 rate limit, 529
 	// overloaded), wait and re-run the turn on a fresh agent session via
@@ -2504,7 +2511,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		return e.sendWithErrorForWorkspace(p, replyCtx, content, workspaceDir)
 	}
 	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx, workspaceRenderer)
-	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer, workspaceDir)
+	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer, workspaceDir, e.getInjectPrompt(sessionKey))
 	state.mu.Unlock()
 
 	// Idle timeout: 0 = disabled
@@ -2977,6 +2984,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 
 				queuedPrompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey)
+				if inj := e.getInjectPrompt(queued.msgSessionKey); inj != "" {
+					queuedPrompt += "\n\n[inject: " + inj + "]"
+				}
 
 				nextSend := make(chan error, 1)
 				go func() {
@@ -2999,7 +3009,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					return e.renderOutgoingContentForWorkspace(queued.platform, content, workspaceDir)
 				}
 				sp = newStreamPreview(e.streamPreview, queued.platform, queued.replyCtx, e.ctx, queuedRenderer)
-				cp = newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), queuedRenderer, workspaceDir)
+				cp = newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), queuedRenderer, workspaceDir, e.getInjectPrompt(queued.msgSessionKey))
 
 				session.AddHistory("user", queued.content)
 
@@ -3141,6 +3151,9 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 
 		e.i18n.DetectAndSet(queued.content)
 		prompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey)
+		if inj := e.getInjectPrompt(queued.msgSessionKey); inj != "" {
+			prompt += "\n\n[inject: " + inj + "]"
+		}
 
 		if state.agentSession == nil || !state.agentSession.Alive() {
 			e.send(queued.platform, queued.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session ended"))
@@ -3217,6 +3230,7 @@ var builtinCommands = []struct {
 	{[]string{"whoami", "myid"}, "whoami"},
 	{[]string{"web"}, "web"},
 	{[]string{"diff"}, "diff"},
+	{[]string{"inject"}, "inject"},
 }
 
 // isBtwCommand checks if a trimmed message starts with a /btw command.
@@ -3237,6 +3251,19 @@ func matchBtwPrefix(trimmed string) string {
 		}
 	}
 	return ""
+}
+
+// isInjectPrefix returns true if content starts with "inject:" (case-insensitive).
+func isInjectPrefix(content string) bool {
+	lower := strings.ToLower(strings.TrimSpace(content))
+	return strings.HasPrefix(lower, "inject:")
+}
+
+// extractInjectText extracts the text after "inject:" prefix.
+func extractInjectText(content string) string {
+	trimmed := strings.TrimSpace(content)
+	// Skip past "inject:" (case-insensitive)
+	return strings.TrimSpace(trimmed[len("inject:"):])
 }
 
 // matchPrefix finds a unique command matching the given prefix.
@@ -3417,6 +3444,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdWhoami(p, msg)
 	case "web":
 		e.cmdWeb(p, msg, args)
+	case "inject":
+		e.cmdInject(p, msg, args)
 	default:
 		if custom, ok := e.commands.Resolve(cmd); ok {
 			if disabledCmds[strings.ToLower(custom.Name)] {
@@ -5771,6 +5800,39 @@ func (e *Engine) applyLiveModeChange(sessionKey, mode string) bool {
 		return false
 	}
 	return switcher.SetLiveMode(mode)
+}
+
+func (e *Engine) cmdInject(p Platform, msg *Message, args []string) {
+	if e.projectState == nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgInjectCleared))
+		return
+	}
+	channelID := extractChannelID(msg.SessionKey)
+	if channelID == "" {
+		return
+	}
+	text := strings.TrimSpace(strings.Join(args, " "))
+	if text == "" {
+		e.projectState.ClearInjectPrompt(channelID)
+		e.projectState.Save()
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgInjectCleared))
+		return
+	}
+	e.projectState.SetInjectPrompt(channelID, text)
+	e.projectState.Save()
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgInjectSet), text))
+}
+
+// getInjectPrompt returns the custom inject prompt for a session key's channel, or empty string.
+func (e *Engine) getInjectPrompt(sessionKey string) string {
+	if e.projectState == nil {
+		return ""
+	}
+	channelID := extractChannelID(sessionKey)
+	if channelID == "" {
+		return ""
+	}
+	return e.projectState.GetInjectPrompt(channelID)
 }
 
 func (e *Engine) cmdQuiet(p Platform, msg *Message, args []string) {

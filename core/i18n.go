@@ -432,6 +432,9 @@ const (
 	MsgBtwSent           MsgKey = "btw_sent"
 	MsgBtwSendFailed     MsgKey = "btw_send_failed"
 
+	MsgInjectSet     MsgKey = "inject_set"
+	MsgInjectCleared MsgKey = "inject_cleared"
+
 	MsgWhoamiTitle     MsgKey = "whoami_title"
 	MsgWhoamiCardTitle MsgKey = "whoami_card_title"
 	MsgWhoamiName      MsgKey = "whoami_name"
@@ -496,6 +499,7 @@ const (
 	MsgBuiltinCmdShell     MsgKey = "shell"
 	MsgBuiltinCmdDir       MsgKey = "dir"
 	MsgBuiltinCmdDiff      MsgKey = "diff"
+	MsgBuiltinCmdInject    MsgKey = "inject"
 
 	MsgDiffEmpty           MsgKey = "diff_empty"
 	MsgDiffNoDiff2HTML     MsgKey = "diff_no_diff2html"
@@ -2942,6 +2946,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "❌ 現在のセッションへのメッセージ注入に失敗しました。",
 		LangSpanish:            "❌ Error al inyectar el mensaje en la sesión actual.",
 	},
+	MsgInjectSet: {
+		LangEnglish:            "📌 Inject prompt set: %s\nThis will be appended to every query. Send `inject:` to clear.",
+		LangChinese:            "📌 注入提示已设置: %s\n将追加到每条消息。发送 `inject:` 以清除。",
+		LangTraditionalChinese: "📌 注入提示已設置: %s\n將附加到每條訊息。傳送 `inject:` 以清除。",
+		LangJapanese:           "📌 注入プロンプト設定: %s\n全てのクエリに追加されます。`inject:` で解除。",
+		LangSpanish:            "📌 Prompt de inyección establecido: %s\nSe añadirá a cada consulta. Envía `inject:` para borrar.",
+	},
+	MsgInjectCleared: {
+		LangEnglish:            "📌 Inject prompt cleared.",
+		LangChinese:            "📌 注入提示已清除。",
+		LangTraditionalChinese: "📌 注入提示已清除。",
+		LangJapanese:           "📌 注入プロンプトを解除しました。",
+		LangSpanish:            "📌 Prompt de inyección borrado.",
+	},
 	MsgWhoamiTitle: {
 		LangEnglish:            "🪪 **Your Identity**",
 		LangChinese:            "🪪 **你的身份信息**",
@@ -3345,6 +3363,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "產生 git diff 並以 HTML 檔案傳送，參數: [目標]",
 		LangJapanese:           "git diff を HTML ファイルで生成、引数: [ターゲット]",
 		LangSpanish:            "Generar git diff como archivo HTML, arg: [objetivo]",
+	},
+	MsgBuiltinCmdInject: {
+		LangEnglish:            "Set/clear custom prompt injected into every query",
+		LangChinese:            "设置/清除自定义注入提示（附加到每条消息）",
+		LangTraditionalChinese: "設置/清除自訂注入提示（附加到每條訊息）",
+		LangJapanese:           "全クエリに注入するカスタムプロンプトを設定/解除",
+		LangSpanish:            "Establecer/borrar prompt personalizado inyectado en cada consulta",
 	},
 	MsgDiffEmpty: {
 		LangEnglish:            "No diff — clean working tree (or no changes vs `%s`).",

@@ -11,6 +11,7 @@ import (
 type projectStateData struct {
 	WorkDirOverride       string            `json:"work_dir_override,omitempty"`
 	WorkspaceDirOverrides map[string]string `json:"workspace_dir_overrides,omitempty"`
+	InjectPrompts         map[string]string `json:"inject_prompts,omitempty"` // channelID → custom prompt
 }
 
 // ProjectStateStore persists lightweight runtime state for one project.
@@ -72,6 +73,36 @@ func (ps *ProjectStateStore) ClearWorkspaceDirOverride(workspace string) {
 
 func (ps *ProjectStateStore) ClearWorkDirOverride() {
 	ps.SetWorkDirOverride("")
+}
+
+func (ps *ProjectStateStore) GetInjectPrompt(channelID string) string {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	if ps.state.InjectPrompts == nil {
+		return ""
+	}
+	return ps.state.InjectPrompts[channelID]
+}
+
+func (ps *ProjectStateStore) SetInjectPrompt(channelID, prompt string) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.state.InjectPrompts == nil {
+		ps.state.InjectPrompts = make(map[string]string)
+	}
+	ps.state.InjectPrompts[channelID] = prompt
+}
+
+func (ps *ProjectStateStore) ClearInjectPrompt(channelID string) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.state.InjectPrompts == nil {
+		return
+	}
+	delete(ps.state.InjectPrompts, channelID)
+	if len(ps.state.InjectPrompts) == 0 {
+		ps.state.InjectPrompts = nil
+	}
 }
 
 func (ps *ProjectStateStore) Save() {
