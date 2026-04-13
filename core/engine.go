@@ -5887,7 +5887,7 @@ func (e *Engine) getInjectPrompt(sessionKey string) string {
 		return ""
 	}
 	result := e.projectState.GetInjectPrompt(channelID)
-	slog.Info("getInjectPrompt", "sessionKey", sessionKey, "channelID", channelID, "result", result)
+	slog.Debug("getInjectPrompt", "sessionKey", sessionKey, "channelID", channelID, "result", result)
 	return result
 }
 

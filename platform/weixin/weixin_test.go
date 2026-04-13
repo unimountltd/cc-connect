@@ -3,6 +3,7 @@ package weixin
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -83,7 +84,7 @@ func TestSendAudioRejectsEmptyAudio(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for empty audio")
 	}
-	if !containsStr(err.Error(), "empty audio") {
+	if !strings.Contains(err.Error(), "empty audio") {
 		t.Fatalf("expected 'empty audio' error, got: %v", err)
 	}
 }
@@ -94,7 +95,7 @@ func TestSendAudioRejectsInvalidReplyContext(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for invalid reply context")
 	}
-	if !containsStr(err.Error(), "invalid reply context") {
+	if !strings.Contains(err.Error(), "invalid reply context") {
 		t.Fatalf("expected 'invalid reply context' error, got: %v", err)
 	}
 }
@@ -105,20 +106,7 @@ func TestSendAudioRejectsNilReplyContext(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for nil reply context")
 	}
-	if !containsStr(err.Error(), "invalid reply context") {
+	if !strings.Contains(err.Error(), "invalid reply context") {
 		t.Fatalf("expected 'invalid reply context' error, got: %v", err)
 	}
-}
-
-func containsStr(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsStrHelper(s, substr))
-}
-
-func containsStrHelper(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
