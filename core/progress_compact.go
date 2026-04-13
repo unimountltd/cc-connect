@@ -786,6 +786,7 @@ func (w *compactProgressWriter) buildCompactBlock(activeLine string) string {
 	if w.injectHeader != "" {
 		lines = append(lines, "📌 "+w.injectHeader)
 	}
+	slog.Debug("buildCompactBlock", "injectHeader", w.injectHeader, "frozenLines", len(w.frozenLines), "activeLine", activeLine)
 	lines = append(lines, w.frozenLines...)
 	if activeLine != "" {
 		lines = append(lines, activeLine)

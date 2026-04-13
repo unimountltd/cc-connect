@@ -258,6 +258,7 @@ type interactiveState struct {
 	platform               Platform
 	replyCtx               any
 	workspaceDir           string
+	injectPrompt           string // custom inject prompt for progress card display
 	mu                     sync.Mutex
 	stopCh                 chan struct{}
 	stopped                bool
@@ -2005,10 +2006,11 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		state.mu.Unlock()
 	}
 
-	// Update reply context for this turn
+	// Update reply context and inject prompt for this turn
 	state.mu.Lock()
 	state.platform = p
 	state.replyCtx = msg.ReplyCtx
+	state.injectPrompt = e.getInjectPrompt(msg.SessionKey)
 	state.mu.Unlock()
 
 	if state.agentSession == nil {
@@ -2510,8 +2512,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	sendWorkspaceWithError := func(p Platform, replyCtx any, content string) error {
 		return e.sendWithErrorForWorkspace(p, replyCtx, content, workspaceDir)
 	}
+	injectHeader := state.injectPrompt
 	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx, workspaceRenderer)
-	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer, workspaceDir, e.getInjectPrompt(sessionKey))
+	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer, workspaceDir, injectHeader)
 	state.mu.Unlock()
 
 	// Idle timeout: 0 = disabled
@@ -5826,13 +5829,17 @@ func (e *Engine) cmdInject(p Platform, msg *Message, args []string) {
 // getInjectPrompt returns the custom inject prompt for a session key's channel, or empty string.
 func (e *Engine) getInjectPrompt(sessionKey string) string {
 	if e.projectState == nil {
+		slog.Debug("getInjectPrompt: projectState is nil")
 		return ""
 	}
 	channelID := extractChannelID(sessionKey)
 	if channelID == "" {
+		slog.Debug("getInjectPrompt: empty channelID", "sessionKey", sessionKey)
 		return ""
 	}
-	return e.projectState.GetInjectPrompt(channelID)
+	result := e.projectState.GetInjectPrompt(channelID)
+	slog.Info("getInjectPrompt", "sessionKey", sessionKey, "channelID", channelID, "result", result)
+	return result
 }
 
 func (e *Engine) cmdQuiet(p Platform, msg *Message, args []string) {
