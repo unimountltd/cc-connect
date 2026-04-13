@@ -2,7 +2,10 @@ package claudecode
 
 import (
 	"context"
+	"io"
+	"os/exec"
 	"testing"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -183,5 +186,50 @@ func TestHandleResultMaxTurnsNotRetriable(t *testing.T) {
 	}
 	if evt.ErrorKind != core.ErrorKindUnknown {
 		t.Errorf("ErrorKind = %q, want empty/unknown", evt.ErrorKind)
+	}
+}
+
+func TestClaudeSessionClose_IdempotentNoPanic(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "sleep", "120")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(done)
+	}()
+
+	cs := &claudeSession{
+		cmd:                 cmd,
+		stdin:               stdin,
+		ctx:                 ctx,
+		cancel:              cancel,
+		done:                done,
+		gracefulStopTimeout: 200 * time.Millisecond,
+	}
+	cs.alive.Store(true)
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Errorf("Close panicked: %v", r)
+		}
+	}()
+
+	if err := cs.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	if err := cs.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
 	}
 }

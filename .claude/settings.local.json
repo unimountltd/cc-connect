@@ -2,7 +2,22 @@
   "permissions": {
     "allow": [
       "Bash(git add:*)",
-      "Bash(git commit -m ':*)"
+      "Bash(git commit -m ':*)",
+      "Bash(lsof /Users/bunbun/.cc-connect/*.lock)",
+      "Read(//Users/bunbun/.cc-connect/**)",
+      "Bash(launchctl list:*)",
+      "Bash(go build:*)",
+      "Read(//Users/bunbun/Library/LaunchAgents/**)",
+      "Bash(launchctl start:*)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(/opt/homebrew/bin/cc-connect --version)",
+      "Bash(/opt/homebrew/bin/cc-connect version:*)",
+      "Bash(/opt/homebrew/bin/cc-connect -h)",
+      "Bash(timeout 5 /opt/homebrew/bin/cc-connect)",
+      "Bash(echo \"EXIT: $?\")",
+      "Bash(make build:*)",
+      "Bash(cp cc-connect:*)",
+      "Bash(cc-connect daemon:*)"
     ]
   }
 }

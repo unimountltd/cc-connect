@@ -168,6 +168,9 @@ func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode strin
 
 func (cs *claudeSession) readLoop(stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
 	defer func() {
+		// Always close stdout to unblock any future reads
+		_ = stdout.Close()
+		// Wait for process to exit (this is needed to release resources)
 		if err := cs.cmd.Wait(); err != nil {
 			stderrMsg := strings.TrimSpace(stderrBuf.String())
 			if stderrMsg != "" {

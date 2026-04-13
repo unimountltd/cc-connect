@@ -1396,19 +1396,18 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		return
 	}
 
-	// Enrich content with platform-specific context (reply quotes, location text, etc.)
+	// Resolve aliases on user text BEFORE merging ExtraContent, so reply
+	// quotes and platform context survive alias resolution (PR #420 fix).
+	content = e.resolveAlias(content)
 	if msg.ExtraContent != "" {
 		if content == "" {
 			msg.Content = msg.ExtraContent
-			content = msg.ExtraContent
 		} else {
 			msg.Content = msg.ExtraContent + "\n" + content
 		}
+	} else {
+		msg.Content = content
 	}
-
-	// Resolve aliases: check if the first word (or whole content) matches an alias
-	content = e.resolveAlias(content)
-	msg.Content = content
 
 	// Rate limit check (per-user role-based, then global fallback)
 	if !e.checkRateLimit(msg) {
@@ -2261,6 +2260,21 @@ func (e *Engine) workspaceContext(workspace, sessionKey string) (Agent, *Session
 }
 
 // getOrCreateInteractiveStateWith accepts an optional agent override for multi-workspace mode.
+// adoptPendingFromPlaceholder copies pendingMessages from an existing placeholder
+// state to newState so queued messages are not lost when the map entry is replaced.
+// Must be called under interactiveMu.
+func adoptPendingFromPlaceholder(existing, newState *interactiveState) {
+	if existing == nil || existing == newState {
+		return
+	}
+	existing.mu.Lock()
+	if len(existing.pendingMessages) > 0 {
+		newState.pendingMessages = existing.pendingMessages
+		existing.pendingMessages = nil
+	}
+	existing.mu.Unlock()
+}
+
 // When agentOverride is non-nil it is used instead of e.agent to start the session.
 // ccSessionKey, when non-empty, is used for CC_SESSION_KEY env injection; otherwise sessionKey is used.
 func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent, ccSessionKey string) *interactiveState {
@@ -2347,7 +2361,9 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	// Check if context is already canceled (e.g. during shutdown/restart)
 	if e.ctx.Err() != nil {
 		slog.Debug("skipping session start: context canceled", "session_key", sessionKey)
-		state = &interactiveState{platform: p, replyCtx: replyCtx}
+		newState := &interactiveState{platform: p, replyCtx: replyCtx}
+		adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
+		state = newState
 		e.interactiveStates[sessionKey] = state
 		return state
 	}
@@ -2376,7 +2392,9 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		}
 		if err != nil {
 			slog.Error("failed to start interactive session", "error", err, "elapsed", startElapsed)
-			state = &interactiveState{platform: p, replyCtx: replyCtx}
+			newState := &interactiveState{platform: p, replyCtx: replyCtx}
+			adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
+			state = newState
 			e.interactiveStates[sessionKey] = state
 			return state
 		}
@@ -2391,11 +2409,13 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		}
 	}
 
-	state = &interactiveState{
+	newState := &interactiveState{
 		agentSession: agentSession,
 		platform:     p,
 		replyCtx:     replyCtx,
 	}
+	adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
+	state = newState
 	e.interactiveStates[sessionKey] = state
 
 	slog.Info("session spawned", "session_key", sessionKey, "agent_session", session.GetAgentSessionID(), "is_resume", isResume, "elapsed", startElapsed)
@@ -2407,6 +2427,10 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 // skipped if the map entry has been replaced by a different state — this prevents
 // a stale goroutine (still running after /new created a fresh Session object and
 // a new turn started on it) from accidentally destroying the replacement state.
+//
+// IMPORTANT: The state is deleted from the map AFTER the agent session is closed
+// to avoid race conditions where concurrent requests see an empty map while the
+// agent session is still being shut down (which can take up to 130s for Stop hooks).
 func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interactiveState) {
 	e.interactiveMu.Lock()
 	state, ok := e.interactiveStates[sessionKey]
@@ -2415,7 +2439,11 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 		e.interactiveMu.Unlock()
 		return
 	}
-	delete(e.interactiveStates, sessionKey)
+	// Capture the agent session before any further processing
+	var agentSession AgentSession
+	if ok && state != nil {
+		agentSession = state.agentSession
+	}
 	e.interactiveMu.Unlock()
 
 	// Notify senders of any queued messages that will never be processed.
@@ -2424,9 +2452,25 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 		e.notifyDroppedQueuedMessages(state, fmt.Errorf("session reset"))
 	}
 
-	if ok && state != nil && state.agentSession != nil {
-		e.closeAgentSessionWithTimeout(sessionKey, state.agentSession)
+	// Close the agent session BEFORE deleting from the map.
+	// This prevents race conditions where /stop during cleanup sees
+	// an empty map and reports "No execution in progress" while
+	// the agent session Close() is still blocking (up to 130s).
+	if agentSession != nil {
+		e.closeAgentSessionWithTimeout(sessionKey, agentSession)
 	}
+
+	// Now delete the state from the map after the session is closed.
+	e.interactiveMu.Lock()
+	// Re-check that the state hasn't been replaced during the close
+	currentState, currentOk := e.interactiveStates[sessionKey]
+	if currentOk && len(expected) > 0 && expected[0] != nil && currentState != expected[0] {
+		// Another turn has replaced the state during our close — don't delete it.
+		e.interactiveMu.Unlock()
+		return
+	}
+	delete(e.interactiveStates, sessionKey)
+	e.interactiveMu.Unlock()
 }
 
 func (e *Engine) closeAgentSessionAsync(sessionKey string, agentSession AgentSession) {
@@ -4069,6 +4113,11 @@ func (e *Engine) cmdDiff(p Platform, msg *Message, raw string) {
 		diffTarget = strings.TrimSpace(raw[6:])
 	}
 
+	if strings.HasPrefix(diffTarget, "-") {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), "diff target must not start with '-'"))
+		return
+	}
+
 	// Resolve working directory (same pattern as cmdShell)
 	var workDir string
 	if e.multiWorkspace {
@@ -4109,7 +4158,7 @@ func (e *Engine) cmdDiff(p Platform, msg *Message, raw string) {
 
 		gitArgs := []string{"diff"}
 		if diffTarget != "" {
-			gitArgs = append(gitArgs, diffTarget)
+			gitArgs = append(gitArgs, "--", diffTarget)
 		}
 		gitCmd := exec.CommandContext(ctx, "git", gitArgs...)
 		gitCmd.Dir = workDir
