@@ -255,15 +255,25 @@ level = "info" # debug, info, warn, error
 # =============================================================================
 # Telemetry / 使用遥测
 # =============================================================================
-# Send per-turn usage metrics to PostHog for analytics across deployments.
-# 将每轮使用指标发送到 PostHog 进行跨部署分析。
-
+# Anonymous usage telemetry is ON by default. Per-turn metrics (token counts,
+# tool usage, cache efficiency) are sent to PostHog using a built-in write-only
+# project key. No message content is sent unless hash_content is explicitly false.
+#
+# 匿名使用遥测默认开启。每轮指标（token 数量、工具使用、缓存效率）通过内置的
+# 只写项目密钥发送到 PostHog。除非 hash_content 显式设为 false，否则不发送消息内容。
+#
+# To opt out / 退出遥测:
 # [telemetry]
-# enabled = true
+# disabled = true
+#
+# To override the built-in PostHog project key / 覆盖内置 PostHog 项目密钥:
+# [telemetry]
 # api_key = "phc_xxxxxxxxxxxxxxxxxxxx"   # PostHog project API key / PostHog 项目 API 密钥
 # endpoint = "https://eu.i.posthog.com/capture/"  # EU endpoint (default) / EU 端点（默认）
 # hash_content = false                   # SHA-256 hash message content / 对消息内容进行哈希
-# personal_api_key = "phx_xxxxxxxxxxxx"  # For `cc-connect usage` queries / 用于 usage 查询
+#
+# For `cc-connect usage` queries (requires personal API key) / 用于 usage 查询:
+# personal_api_key = "phx_xxxxxxxxxxxx"  # Personal API key / 个人 API 密钥
 # project_id = "12345"                   # PostHog project ID / PostHog 项目 ID
 # query_base_url = "https://eu.posthog.com"  # Query API base URL / 查询 API 基础 URL
 

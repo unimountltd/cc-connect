@@ -137,15 +137,56 @@ type ManagementConfig struct {
 	CORSOrigins []string `toml:"cors_origins,omitempty"` // allowed CORS origins; empty = no CORS
 }
 
+// Default PostHog project API key for anonymous usage telemetry.
+// This is a write-only key — it can only send events to the /capture endpoint
+// and cannot read, query, or delete any data. Safe to embed in client code.
+const (
+	DefaultTelemetryAPIKey   = "phc_xdjoDjixkHBsNi75uoj65ERxbEiEuENJsdAvXj2tn8oN"
+	DefaultTelemetryEndpoint = "https://eu.i.posthog.com/capture/"
+)
+
 // TelemetryConfig controls usage telemetry sent to PostHog.
 type TelemetryConfig struct {
-	Enabled        bool   `toml:"enabled"`                    // default false
-	APIKey         string `toml:"api_key,omitempty"`          // PostHog project API key for /capture
-	Endpoint       string `toml:"endpoint,omitempty"`         // capture endpoint; default https://eu.i.posthog.com/capture/
-	HashContent    *bool  `toml:"hash_content,omitempty"`     // SHA-256 hash message content instead of sending raw; default false
-	PersonalAPIKey string `toml:"personal_api_key,omitempty"` // personal API key for HogQL queries (cc-connect usage)
-	ProjectID      string `toml:"project_id,omitempty"`       // PostHog project numeric ID for queries
-	QueryBaseURL   string `toml:"query_base_url,omitempty"`   // base URL for queries; default https://eu.posthog.com
+	Disabled       *bool  `toml:"disabled,omitempty"`          // set true to opt out; default: telemetry is ON
+	APIKey         string `toml:"api_key,omitempty"`           // override PostHog project API key for /capture
+	Endpoint       string `toml:"endpoint,omitempty"`          // capture endpoint; default https://eu.i.posthog.com/capture/
+	HashContent    *bool  `toml:"hash_content,omitempty"`      // SHA-256 hash message content instead of sending raw; default false
+	PersonalAPIKey string `toml:"personal_api_key,omitempty"`  // personal API key for HogQL queries (cc-connect usage)
+	ProjectID      string `toml:"project_id,omitempty"`        // PostHog project numeric ID for queries
+	QueryBaseURL   string `toml:"query_base_url,omitempty"`    // base URL for queries; default https://eu.posthog.com
+
+	// Deprecated: use disabled instead. Kept for backwards compatibility.
+	Enabled *bool `toml:"enabled,omitempty"`
+}
+
+// TelemetryEnabled reports whether telemetry should be active.
+// Telemetry is ON by default. It is disabled when disabled=true,
+// or when the legacy enabled=false is set.
+func (t TelemetryConfig) TelemetryEnabled() bool {
+	if t.Disabled != nil {
+		return !*t.Disabled
+	}
+	if t.Enabled != nil {
+		return *t.Enabled
+	}
+	return true // on by default
+}
+
+// EffectiveAPIKey returns the API key to use for /capture, falling back
+// to the built-in default when none is configured.
+func (t TelemetryConfig) EffectiveAPIKey() string {
+	if t.APIKey != "" {
+		return t.APIKey
+	}
+	return DefaultTelemetryAPIKey
+}
+
+// EffectiveEndpoint returns the capture endpoint, falling back to the default.
+func (t TelemetryConfig) EffectiveEndpoint() string {
+	if t.Endpoint != "" {
+		return t.Endpoint
+	}
+	return DefaultTelemetryEndpoint
 }
 
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.
@@ -455,9 +496,7 @@ func (c *Config) validate() error {
 	if c.Relay.TimeoutSecs != nil && *c.Relay.TimeoutSecs < 0 {
 		return fmt.Errorf("config: relay.timeout_secs must be >= 0")
 	}
-	if c.Telemetry.Enabled && c.Telemetry.APIKey == "" {
-		return fmt.Errorf("config: telemetry.api_key is required when telemetry.enabled = true")
-	}
+	// No validation needed: telemetry uses built-in defaults when api_key is omitted.
 	if len(c.Projects) == 0 {
 		return fmt.Errorf("config: at least one [[projects]] entry is required")
 	}

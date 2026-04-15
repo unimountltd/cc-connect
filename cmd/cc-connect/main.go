@@ -652,13 +652,13 @@ func main() {
 			return fmt.Sprintf("http://localhost:%d", port)
 		})
 
-		if cfg.Telemetry.Enabled && cfg.Telemetry.APIKey != "" {
-			endpoint := cfg.Telemetry.Endpoint
-			if endpoint == "" {
-				endpoint = "https://eu.i.posthog.com/capture/"
-			}
+		if cfg.Telemetry.TelemetryEnabled() {
 			hashContent := cfg.Telemetry.HashContent != nil && *cfg.Telemetry.HashContent
-			engine.SetTelemetryCollector(core.NewPostHogCollector(cfg.Telemetry.APIKey, endpoint, hashContent))
+			engine.SetTelemetryCollector(core.NewPostHogCollector(
+				cfg.Telemetry.EffectiveAPIKey(),
+				cfg.Telemetry.EffectiveEndpoint(),
+				hashContent,
+			))
 		}
 
 		engines = append(engines, engine)
