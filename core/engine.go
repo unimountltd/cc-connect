@@ -2852,11 +2852,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 			cp.Finalize(ProgressCardStateCompleted)
 
-			if state != nil && state.agentSession != nil {
-				if currentID := state.agentSession.CurrentSessionID(); currentID != "" {
-					session.SetAgentSessionID(currentID, e.agent.Name())
-					sessions.Save()
-				}
+			if event.SessionID != "" {
+				session.SetAgentSessionID(event.SessionID, e.agent.Name())
 			}
 
 			fullResponse := event.Content
@@ -10155,9 +10152,8 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 				textParts = append(textParts, fmt.Sprintf(e.i18n.T(MsgToolResult), tn, out)+"\n\n")
 			}
 		case EventResult:
-			// Use agentSession.CurrentSessionID() for the same reason as above.
-			if currentID := agentSession.CurrentSessionID(); currentID != "" {
-				session.SetAgentSessionID(currentID, e.agent.Name())
+			if event.SessionID != "" {
+				session.SetAgentSessionID(event.SessionID, e.agent.Name())
 				e.sessions.Save()
 			}
 			resp := event.Content
