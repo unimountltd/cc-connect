@@ -88,6 +88,9 @@ func main() {
 		case "doctor":
 			runDoctor(os.Args[2:])
 			return
+		case "usage":
+			runUsage(os.Args[2:])
+			return
 		}
 	}
 
@@ -649,6 +652,15 @@ func main() {
 			return fmt.Sprintf("http://localhost:%d", port)
 		})
 
+		if cfg.Telemetry.Enabled && cfg.Telemetry.APIKey != "" {
+			endpoint := cfg.Telemetry.Endpoint
+			if endpoint == "" {
+				endpoint = "https://eu.i.posthog.com/capture/"
+			}
+			hashContent := cfg.Telemetry.HashContent != nil && *cfg.Telemetry.HashContent
+			engine.SetTelemetryCollector(core.NewPostHogCollector(cfg.Telemetry.APIKey, endpoint, hashContent))
+		}
+
 		engines = append(engines, engine)
 		effectiveWorkDirs = append(effectiveWorkDirs, effectiveWorkDir)
 	}
@@ -961,6 +973,11 @@ func main() {
 		if err := e.Stop(); err != nil {
 			slog.Error("shutdown error", "error", err)
 		}
+		tc := e.TelemetryCollector()
+		if err := tc.Flush(); err != nil {
+			slog.Warn("telemetry flush error", "error", err)
+		}
+		tc.Close()
 	}
 	if logCloser != nil {
 		logCloser.Close()

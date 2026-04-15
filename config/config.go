@@ -102,6 +102,7 @@ type Config struct {
 	Webhook           WebhookConfig           `toml:"webhook"`
 	Bridge            BridgeConfig            `toml:"bridge"`
 	Management        ManagementConfig        `toml:"management"`
+	Telemetry         TelemetryConfig         `toml:"telemetry"`
 	IdleTimeoutMins   *int                    `toml:"idle_timeout_mins,omitempty"` // max minutes between agent events; 0 = no timeout; default 120
 }
 
@@ -134,6 +135,17 @@ type ManagementConfig struct {
 	Port        int      `toml:"port,omitempty"`         // listen port; default 9820
 	Token       string   `toml:"token,omitempty"`        // shared secret for authentication; required
 	CORSOrigins []string `toml:"cors_origins,omitempty"` // allowed CORS origins; empty = no CORS
+}
+
+// TelemetryConfig controls usage telemetry sent to PostHog.
+type TelemetryConfig struct {
+	Enabled        bool   `toml:"enabled"`                    // default false
+	APIKey         string `toml:"api_key,omitempty"`          // PostHog project API key for /capture
+	Endpoint       string `toml:"endpoint,omitempty"`         // capture endpoint; default https://eu.i.posthog.com/capture/
+	HashContent    *bool  `toml:"hash_content,omitempty"`     // SHA-256 hash message content instead of sending raw; default false
+	PersonalAPIKey string `toml:"personal_api_key,omitempty"` // personal API key for HogQL queries (cc-connect usage)
+	ProjectID      string `toml:"project_id,omitempty"`       // PostHog project numeric ID for queries
+	QueryBaseURL   string `toml:"query_base_url,omitempty"`   // base URL for queries; default https://eu.posthog.com
 }
 
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.
@@ -442,6 +454,9 @@ func (c *Config) validate() error {
 	}
 	if c.Relay.TimeoutSecs != nil && *c.Relay.TimeoutSecs < 0 {
 		return fmt.Errorf("config: relay.timeout_secs must be >= 0")
+	}
+	if c.Telemetry.Enabled && c.Telemetry.APIKey == "" {
+		return fmt.Errorf("config: telemetry.api_key is required when telemetry.enabled = true")
 	}
 	if len(c.Projects) == 0 {
 		return fmt.Errorf("config: at least one [[projects]] entry is required")

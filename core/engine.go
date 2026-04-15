@@ -165,6 +165,7 @@ type Engine struct {
 
 	cronScheduler      *CronScheduler
 	heartbeatScheduler *HeartbeatScheduler
+	telemetry          TelemetryCollector
 
 	commands *CommandRegistry
 	skills   *SkillRegistry
@@ -270,6 +271,7 @@ type interactiveState struct {
 	deleteMode             *deleteModeState
 	lastAutoCompressAt     time.Time
 	lastAutoCompressTokens int
+	skillsInvokedThisTurn  []string
 }
 
 type deleteModeState struct {
@@ -278,6 +280,16 @@ type deleteModeState struct {
 	phase       string
 	hint        string
 	result      string
+}
+
+// telemetryMsgCtx carries the message-level fields needed for telemetry
+// through the event loop without threading the full *Message.
+type telemetryMsgCtx struct {
+	UserID       string
+	UserName     string
+	PlatformName string
+	ChatID       string
+	Content      string
 }
 
 // pendingPermission represents a permission request waiting for user response.
@@ -351,6 +363,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		references:            DefaultReferenceRenderCfg(),
 		eventIdleTimeout:      defaultEventIdleTimeout,
 		showContextIndicator:  true,
+		telemetry:             NoopTelemetryCollector(),
 	}
 
 	if ag != nil {
@@ -576,6 +589,14 @@ func (e *Engine) SetCronScheduler(cs *CronScheduler) {
 
 func (e *Engine) SetHeartbeatScheduler(hs *HeartbeatScheduler) {
 	e.heartbeatScheduler = hs
+}
+
+func (e *Engine) SetTelemetryCollector(tc TelemetryCollector) {
+	e.telemetry = tc
+}
+
+func (e *Engine) TelemetryCollector() TelemetryCollector {
+	return e.telemetry
 }
 
 func (e *Engine) SetCommandSaveAddFunc(fn func(name, description, prompt, exec, workDir string) error) {
@@ -2010,6 +2031,9 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state.platform = p
 	state.replyCtx = msg.ReplyCtx
 	state.injectPrompt = e.getInjectPrompt(msg.SessionKey)
+	if msg.SkillInvoked != "" {
+		state.skillsInvokedThisTurn = append(state.skillsInvokedThisTurn, msg.SkillInvoked)
+	}
 	state.mu.Unlock()
 
 	if state.agentSession == nil {
@@ -2058,7 +2082,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 
 	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey)
 	if inj := e.getInjectPrompt(msg.SessionKey); inj != "" {
-		promptContent += "\n\n[inject: " + inj + "]"
+		promptContent += "\n\n[keep in mind: " + inj + "]"
 	}
 
 	// Retry loop: on retriable backend errors (429 rate limit, 529
@@ -2091,7 +2115,14 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 			sendDone <- state.agentSession.Send(promptContent, msg.Images, msg.Files)
 		}()
 
-		retriable := e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone, msg.ReplyCtx)
+		tmCtx := telemetryMsgCtx{
+			UserID:       msg.UserID,
+			UserName:     msg.UserName,
+			PlatformName: msg.Platform,
+			ChatID:       msg.ChannelKey,
+			Content:      msg.Content,
+		}
+		retriable := e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone, msg.ReplyCtx, tmCtx)
 		if elapsed := time.Since(sendStart); elapsed >= slowAgentSend {
 			slog.Warn("slow agent send", "elapsed", elapsed, "session", msg.SessionKey, "content_len", len(msg.Content))
 		}
@@ -2520,10 +2551,11 @@ const defaultEventIdleTimeout = 2 * time.Hour
 // returns the classified ErrorKind so the caller can decide whether to
 // retry after a delay. All other outcomes return ErrorKindUnknown (zero
 // value), whether success, non-retriable error, or channel close.
-func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func(), sendDone <-chan error, replyCtx any) (retriable ErrorKind) {
+func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func(), sendDone <-chan error, replyCtx any, tmCtx telemetryMsgCtx) (retriable ErrorKind) {
 	var textParts []string
 	var segmentStart int // index into textParts: text before this has been sent/displayed
 	toolCount := 0
+	var toolNames []string
 	waitStart := time.Now()
 	firstEventLogged := false
 	triggerAutoCompress := false
@@ -2675,6 +2707,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventToolUse:
 			toolCount++
+			if event.ToolName != "" {
+				toolNames = append(toolNames, event.ToolName)
+			}
 			if e.display.ToolMessages {
 				// Flush accumulated text segment before tool display
 				previewActive := sp.canPreview()
@@ -2912,6 +2947,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				"output_tokens", event.OutputTokens,
 			)
 
+			e.emitTurnTelemetry(state, tmCtx, event, toolNames, toolCount, turnDuration, fullResponse, false, "")
+
 			replyStart := time.Now()
 			normalizedResponse := strings.TrimSpace(fullResponse)
 			state.mu.Lock()
@@ -3032,7 +3069,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 				queuedPrompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey)
 				if inj := e.getInjectPrompt(queued.msgSessionKey); inj != "" {
-					queuedPrompt += "\n\n[inject: " + inj + "]"
+					queuedPrompt += "\n\n[keep in mind: " + inj + "]"
 				}
 
 				nextSend := make(chan error, 1)
@@ -3049,6 +3086,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				textParts = nil
 				segmentStart = 0
 				toolCount = 0
+				toolNames = nil
 				turnStart = time.Now()
 				firstEventLogged = false
 				waitStart = time.Now()
@@ -3097,6 +3135,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				sp.discard()
 				slog.Warn("agent retriable error",
 					"kind", event.ErrorKind, "error", event.Error, "session_key", sessionKey)
+				e.emitTurnTelemetry(state, tmCtx, event, toolNames, toolCount, time.Since(turnStart), "", true, string(event.ErrorKind))
 				if pendingSend != nil {
 					if err := <-pendingSend; err != nil {
 						slog.Debug("async send error during retriable failure", "error", err)
@@ -3110,6 +3149,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			sp.discard()
 			if event.Error != nil {
 				slog.Error("agent error", "error", event.Error)
+				e.emitTurnTelemetry(state, tmCtx, event, toolNames, toolCount, time.Since(turnStart), "", true, string(event.ErrorKind))
 				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
 			}
 			// Only drop queued messages if the agent session is dead.
@@ -3199,7 +3239,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		e.i18n.DetectAndSet(queued.content)
 		prompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey)
 		if inj := e.getInjectPrompt(queued.msgSessionKey); inj != "" {
-			prompt += "\n\n[inject: " + inj + "]"
+			prompt += "\n\n[keep in mind: " + inj + "]"
 		}
 
 		if state.agentSession == nil || !state.agentSession.Alive() {
@@ -3223,13 +3263,110 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		}
 
 		slog.Info("processing queued message", "session", sessionKey)
-		e.processInteractiveEvents(state, session, sessions, sessionKey, "", time.Now(), stopTyping, sendDone, queued.replyCtx)
+		qTmCtx := telemetryMsgCtx{
+			UserID:       queued.userID,
+			UserName:     queued.userName,
+			PlatformName: queued.msgPlatform,
+			ChatID:       queued.msgSessionKey,
+			Content:      queued.content,
+		}
+		e.processInteractiveEvents(state, session, sessions, sessionKey, "", time.Now(), stopTyping, sendDone, queued.replyCtx, qTmCtx)
 	}
 }
 
 // ──────────────────────────────────────────────────────────────
 // Command handling
 // ──────────────────────────────────────────────────────────────
+
+// emitTurnTelemetry builds a TurnEvent from available sources and sends it
+// to the configured telemetry collector.
+func (e *Engine) emitTurnTelemetry(
+	state *interactiveState,
+	tmCtx telemetryMsgCtx,
+	result Event,
+	toolNames []string,
+	toolCount int,
+	duration time.Duration,
+	responseText string,
+	isError bool,
+	errorKind string,
+) {
+	ev := TurnEvent{
+		DeviceSignature:     DeviceSignature(),
+		CCVersion:           CurrentVersion,
+		ProjectName:         e.name,
+		AgentType:           e.agent.Name(),
+		Language:            string(e.i18n.CurrentLang()),
+		ThinkingMessages:    e.display.ThinkingMessages,
+		ToolMessages:        e.display.ToolMessages,
+		Timestamp:           time.Now().UTC(),
+		TurnDurationMs:      duration.Milliseconds(),
+		InputTokens:         result.InputTokens,
+		OutputTokens:        result.OutputTokens,
+		CacheCreationTokens: result.CacheCreationTokens,
+		CacheReadTokens:     result.CacheReadTokens,
+		ContextTokens:       result.ContextTokens,
+		ToolCount:           toolCount,
+		ToolNames:           toolNames,
+		ErrorStatus:         isError,
+		ErrorKind:           errorKind,
+		ResponseLength:      len(responseText),
+		SenderUserID:        tmCtx.UserID,
+		SenderUserName:      tmCtx.UserName,
+		PlatformName:        tmCtx.PlatformName,
+		ChatID:              tmCtx.ChatID,
+		MessageContent:      tmCtx.Content,
+	}
+
+	if e.multiWorkspace {
+		ev.WorkspaceMode = "multi-workspace"
+	}
+
+	if ms, ok := e.agent.(ModelSwitcher); ok {
+		ev.AgentModel = ms.GetModel()
+	}
+	if ms, ok := e.agent.(ModeSwitcher); ok {
+		ev.PermissionMode = ms.GetMode()
+	}
+	if res, ok := e.agent.(ReasoningEffortSwitcher); ok {
+		ev.EffortLevel = res.GetReasoningEffort()
+	}
+
+	if skills := e.skills.ListAll(); len(skills) > 0 {
+		names := make([]string, len(skills))
+		for i, s := range skills {
+			names[i] = s.Name
+		}
+		ev.SkillsAvailable = names
+	}
+	if sp, ok := e.agent.(SkillProvider); ok {
+		ev.SkillDirs = sp.SkillDirs()
+	}
+	if cp, ok := e.agent.(CommandProvider); ok {
+		ev.CommandDirs = cp.CommandDirs()
+	}
+
+	ctxBasis := result.ContextTokens
+	if ctxBasis <= 0 {
+		ctxBasis = result.InputTokens + result.CacheCreationTokens + result.CacheReadTokens
+	}
+	if ctxBasis > 0 {
+		pct := ctxBasis * 100 / modelContextWindow
+		if pct > 100 {
+			pct = 100
+		}
+		ev.ContextPct = pct
+	}
+
+	if state != nil {
+		state.mu.Lock()
+		ev.SkillsInvoked = state.skillsInvokedThisTurn
+		state.skillsInvokedThisTurn = nil
+		state.mu.Unlock()
+	}
+
+	e.telemetry.Collect(ev)
+}
 
 // builtinCommands maps canonical command names to their aliases/full names.
 // The first entry is the canonical name used for prefix matching.
@@ -9257,6 +9394,7 @@ func (e *Engine) executeSkill(p Platform, msg *Message, skill *Skill, args []str
 	)
 
 	msg.Content = prompt
+	msg.SkillInvoked = skill.Name
 	go e.processInteractiveMessage(p, msg, session)
 }
 

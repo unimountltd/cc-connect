@@ -253,6 +253,21 @@ level = "info" # debug, info, warn, error
 # cors_origins = ["http://localhost:3000"]  # Allowed CORS origins / 允许的 CORS 来源
 
 # =============================================================================
+# Telemetry / 使用遥测
+# =============================================================================
+# Send per-turn usage metrics to PostHog for analytics across deployments.
+# 将每轮使用指标发送到 PostHog 进行跨部署分析。
+
+# [telemetry]
+# enabled = true
+# api_key = "phc_xxxxxxxxxxxxxxxxxxxx"   # PostHog project API key / PostHog 项目 API 密钥
+# endpoint = "https://eu.i.posthog.com/capture/"  # EU endpoint (default) / EU 端点（默认）
+# hash_content = false                   # SHA-256 hash message content / 对消息内容进行哈希
+# personal_api_key = "phx_xxxxxxxxxxxx"  # For `cc-connect usage` queries / 用于 usage 查询
+# project_id = "12345"                   # PostHog project ID / PostHog 项目 ID
+# query_base_url = "https://eu.posthog.com"  # Query API base URL / 查询 API 基础 URL
+
+# =============================================================================
 # Speech-to-Text (Voice Messages) / 语音转文字（语音消息）
 # =============================================================================
 # Enable to transcribe voice messages to text before sending to agents.
