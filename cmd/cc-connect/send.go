@@ -275,7 +275,13 @@ Examples:
   cc-connect send -m "Build completed successfully"
   cc-connect send --message "Chart generated" --image /tmp/chart.png
   cc-connect send --file /tmp/report.pdf
+  cc-connect send --session-cmd /new --message "Work on issue #42"
   cc-connect send --stdin <<'EOF'
     Long message with "special" chars, $variables, and newlines
-  EOF`)
+  EOF
+
+Session commands:
+  --session-cmd /new                 reset the session (leaves it idle)
+  --session-cmd /new -m "<prompt>"   reset AND kick off the first turn
+  --session-cmd /switch <n> -m "..." switch to session n AND inject a turn`)
 }

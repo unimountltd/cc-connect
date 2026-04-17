@@ -177,6 +177,18 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.SessionCmd != "" {
+		if req.Message != "" {
+			if len(req.Images) > 0 || len(req.Files) > 0 {
+				http.Error(w, "--session-cmd combined with --message does not yet support attachments", http.StatusBadRequest)
+				return
+			}
+			if err := engine.ExecuteSessionCmdAndSend(req.SessionKey, req.SessionCmd, req.Message); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			apiJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+			return
+		}
 		if err := engine.ExecuteSessionCmd(req.SessionKey, req.SessionCmd); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

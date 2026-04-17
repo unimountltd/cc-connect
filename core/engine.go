@@ -3375,6 +3375,7 @@ var builtinCommands = []struct {
 	id    string
 }{
 	{[]string{"new"}, "new"},
+	{[]string{"next"}, "next"},
 	{[]string{"list", "sessions"}, "list"},
 	{[]string{"switch"}, "switch"},
 	{[]string{"name", "rename"}, "name"},
@@ -3545,6 +3546,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 	switch cmdID {
 	case "new":
 		e.cmdNew(p, msg, args)
+	case "next":
+		e.cmdNext(p, msg, args)
 	case "list":
 		e.cmdList(p, msg, args)
 	case "switch":
@@ -3914,6 +3917,26 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 	} else {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNewSessionCreated))
 	}
+}
+
+// cmdNext starts a fresh session for the user and immediately feeds the
+// remainder of the command as the first user turn. Lets a workflow hand off
+// to the next issue without waiting for someone to type the opening prompt.
+//
+// Usage: `/next <prompt>`
+func (e *Engine) cmdNext(p Platform, msg *Message, args []string) {
+	prompt := strings.TrimSpace(strings.Join(args, " "))
+	if prompt == "" {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNextUsage))
+		return
+	}
+
+	e.cmdNew(p, msg, nil)
+
+	kickoff := *msg
+	kickoff.Content = prompt
+	kickoff.ExtraContent = ""
+	e.handleMessage(p, &kickoff)
 }
 
 // filterOwnedSessions removes agent sessions that are not tracked by cc-connect's
@@ -6610,7 +6633,80 @@ func (e *Engine) ExecuteSessionCmd(sessionKey, command string) error {
 		command = "/" + command
 	}
 
-	// Resolve platform and reply context from session key or active state.
+	p, replyCtx, err := e.resolvePlatformForSession(sessionKey)
+	if err != nil {
+		return err
+	}
+
+	msg := &Message{
+		SessionKey: sessionKey,
+		Platform:   p.Name(),
+		Content:    command,
+		ReplyCtx:   replyCtx,
+	}
+	e.handleCommand(p, msg, command)
+	return nil
+}
+
+// ExecuteSessionCmdAndSend runs a session command (currently "/new" or
+// "/switch") and then injects prompt into the session as if the user typed
+// it. Used by the API's `--session-cmd /new --message "..."` combination so
+// an automated workflow can start a fresh session for each issue and kick
+// off the first turn without a human typing the opening message.
+func (e *Engine) ExecuteSessionCmdAndSend(sessionKey, command, prompt string) error {
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return fmt.Errorf("prompt is required when combining --session-cmd with --message")
+	}
+	if !strings.HasPrefix(command, "/") {
+		command = "/" + command
+	}
+	if !isChainableSessionCmd(command) {
+		return fmt.Errorf("--session-cmd %q cannot be combined with --message (only /new and /switch are supported)", command)
+	}
+
+	p, replyCtx, err := e.resolvePlatformForSession(sessionKey)
+	if err != nil {
+		return err
+	}
+
+	cmdMsg := &Message{
+		SessionKey: sessionKey,
+		Platform:   p.Name(),
+		Content:    command,
+		ReplyCtx:   replyCtx,
+	}
+	e.handleCommand(p, cmdMsg, command)
+
+	kickoff := &Message{
+		SessionKey: sessionKey,
+		Platform:   p.Name(),
+		Content:    prompt,
+		ReplyCtx:   replyCtx,
+	}
+	e.handleMessage(p, kickoff)
+	return nil
+}
+
+// isChainableSessionCmd reports whether a session command can be safely
+// chained with a kickoff prompt. Only commands that leave the session ready
+// to receive a user turn are allowed.
+func isChainableSessionCmd(command string) bool {
+	trimmed := strings.TrimSpace(strings.TrimPrefix(command, "/"))
+	head := strings.ToLower(strings.SplitN(trimmed, " ", 2)[0])
+	switch head {
+	case "new", "next", "switch":
+		return true
+	}
+	return false
+}
+
+// resolvePlatformForSession finds the Platform and reply context for a
+// session key. It prefers the live interactive state; if none is available
+// it falls back to reconstructing the reply context from a platform that
+// implements ReplyContextReconstructor (same mechanism used by cron and
+// heartbeat delivery).
+func (e *Engine) resolvePlatformForSession(sessionKey string) (Platform, any, error) {
 	var p Platform
 	var replyCtx any
 
@@ -6624,7 +6720,6 @@ func (e *Engine) ExecuteSessionCmd(sessionKey, command string) error {
 	e.interactiveMu.Unlock()
 
 	if p == nil {
-		// Try to reconstruct from session key
 		platformName := ""
 		if idx := strings.Index(sessionKey, ":"); idx > 0 {
 			platformName = sessionKey[:idx]
@@ -6634,7 +6729,7 @@ func (e *Engine) ExecuteSessionCmd(sessionKey, command string) error {
 				if rc, ok := candidate.(ReplyContextReconstructor); ok {
 					reconstructed, err := rc.ReconstructReplyCtx(sessionKey)
 					if err != nil {
-						return fmt.Errorf("reconstruct reply context: %w", err)
+						return nil, nil, fmt.Errorf("reconstruct reply context: %w", err)
 					}
 					p = candidate
 					replyCtx = reconstructed
@@ -6645,17 +6740,9 @@ func (e *Engine) ExecuteSessionCmd(sessionKey, command string) error {
 	}
 
 	if p == nil {
-		return fmt.Errorf("no platform found for session %q", sessionKey)
+		return nil, nil, fmt.Errorf("no platform found for session %q", sessionKey)
 	}
-
-	msg := &Message{
-		SessionKey: sessionKey,
-		Platform:   p.Name(),
-		Content:    command,
-		ReplyCtx:   replyCtx,
-	}
-	e.handleCommand(p, msg, command)
-	return nil
+	return p, replyCtx, nil
 }
 
 func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images []ImageAttachment, files []FileAttachment) error {

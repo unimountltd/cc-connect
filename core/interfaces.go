@@ -111,6 +111,25 @@ Environment variables CC_PROJECT and CC_SESSION_KEY are already set, so the rela
 ### Session management
 When the user asks to reset/clear context or start a new session, run:
   cc-connect send --session-cmd /new
+
+### Start a new session and kick it off (batch handoff)
+When you need to hand off to a FRESH session with its own first prompt —
+e.g. iterating through a list of issues and wanting each one in its own
+clean context — combine --session-cmd /new with --message in a single call:
+
+  cc-connect send --session-cmd /new --message "<starter prompt for the new session>"
+
+The current session is ended, a new session is created, and the message
+is delivered as its first user turn. Use this in batch scripts:
+
+  for id in 42 43 44; do
+    cc-connect send --session-cmd /new --message "Fix GitHub issue #$id"
+  done
+
+Calling this from inside the current session will terminate the current
+agent (you) as part of the handoff — only do it when you're finished with
+the current turn. /switch <n> also works for resuming a specific session
+with a kickoff prompt.
 `
 }
 
