@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -32,7 +33,14 @@ const (
 	compactProgressAPITimeout = 15 * time.Second
 
 	// How often the elapsed-time ticker refreshes the compact status line.
-	compactElapsedTickInterval = 5 * time.Second
+	// Kept moderately coarse so busy turns do not burn the platform's
+	// chat.update rate budget (e.g. Slack tier 3 ≈ 1/sec per channel).
+	compactElapsedTickInterval = 10 * time.Second
+
+	// After a transient update failure (rate limit, timeout, 5xx) skip
+	// attempts for this long so we do not hammer the platform while it is
+	// asking us to back off.
+	compactProgressCooldown = 3 * time.Second
 
 	// Show the "send stop to abort" hint only after this duration.
 	compactStopHintDelay = 10 * time.Second
@@ -249,7 +257,64 @@ type compactProgressWriter struct {
 	activeKind     ProgressCardEntryKind // kind of the current active line
 	frozenLines    []string              // completed progress lines with frozen elapsed
 	tickerStop     chan struct{}
-	usageSuffix    string // usage indicator to include in final progress card
+	usageSuffix    string    // usage indicator to include in final progress card
+	cooldownUntil  time.Time // skip UpdateMessage calls until this moment (set on transient errors)
+}
+
+// isTransientUpdateErr reports whether an UpdateMessage error is expected to
+// clear up on its own — rate limits, server timeouts, transient 5xx. The goal
+// is to avoid disabling the progress card for the rest of the turn when a
+// single call hits Slack's rate limit or a 15 s API deadline.
+//
+// Permanent failures (auth revoked, message deleted, invalid channel) still
+// flip w.failed so we stop hammering a dead handle.
+func isTransientUpdateErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Caller-side timeout: the 15s API-call budget expired. Almost always a
+	// slow upstream response, not a permanent failure.
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	// Platform-returned errors that advertise retryability (e.g.
+	// slack-go's *RateLimitedError satisfies this).
+	var retryable interface{ Retryable() bool }
+	if errors.As(err, &retryable) && retryable.Retryable() {
+		return true
+	}
+	// Heuristic fallback: recognise common rate-limit / server-error
+	// wording so platforms without a typed error still benefit.
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "rate limit"),
+		strings.Contains(msg, "rate_limited"),
+		strings.Contains(msg, "ratelimited"),
+		strings.Contains(msg, "too many requests"),
+		strings.Contains(msg, "status 429"),
+		strings.Contains(msg, "status 500"),
+		strings.Contains(msg, "status 502"),
+		strings.Contains(msg, "status 503"),
+		strings.Contains(msg, "status 504"),
+		strings.Contains(msg, "service_unavailable"),
+		strings.Contains(msg, "temporarily unavailable"):
+		return true
+	}
+	return false
+}
+
+// inCooldown reports whether we should skip sending an update right now
+// because a recent transient failure asked us to back off. Must be called
+// with w.mu held.
+func (w *compactProgressWriter) inCooldown() bool {
+	return !w.cooldownUntil.IsZero() && time.Now().Before(w.cooldownUntil)
+}
+
+// noteTransientErrLocked records that an UpdateMessage call failed
+// transiently and sets a short cooldown before the next attempt. Must be
+// called with w.mu held.
+func (w *compactProgressWriter) noteTransientErrLocked() {
+	w.cooldownUntil = time.Now().Add(compactProgressCooldown)
 }
 
 func normalizeProgressStyle(style string) string {
@@ -506,14 +571,27 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 		return true
 	}
 
+	if w.inCooldown() {
+		// Platform asked us to back off recently. Leave w.content fresh so
+		// the next successful update carries the latest state; don't mark
+		// the writer failed.
+		return true
+	}
+
 	callCtx, cancel := w.withAPITimeout()
 	err := w.updater.UpdateMessage(callCtx, w.handle, w.content)
 	cancel()
 	if err != nil {
+		if isTransientUpdateErr(err) {
+			slog.Warn("progress writer: UpdateMessage transient failure; backing off", "platform", w.platform.Name(), "style", w.style, "error", err, "cooldown", compactProgressCooldown)
+			w.noteTransientErrLocked()
+			return true
+		}
 		slog.Warn("progress writer: UpdateMessage failed", "platform", w.platform.Name(), "style", w.style, "error", err)
 		w.failed = true
 		return false
 	}
+	w.cooldownUntil = time.Time{}
 	w.lastSent = w.content
 	return true
 }
@@ -859,14 +937,23 @@ func (w *compactProgressWriter) refreshToolElapsed() {
 	if w.content == w.lastSent {
 		return
 	}
+	if w.inCooldown() {
+		return
+	}
 	callCtx, cancel := w.withAPITimeout()
 	err := w.updater.UpdateMessage(callCtx, w.handle, w.content)
 	cancel()
 	if err != nil {
+		if isTransientUpdateErr(err) {
+			slog.Warn("progress writer: elapsed UpdateMessage transient failure; backing off", "platform", w.platform.Name(), "error", err, "cooldown", compactProgressCooldown)
+			w.noteTransientErrLocked()
+			return
+		}
 		slog.Warn("progress writer: elapsed UpdateMessage failed", "platform", w.platform.Name(), "error", err)
 		w.failed = true
 		return
 	}
+	w.cooldownUntil = time.Time{}
 	w.lastSent = w.content
 }
 

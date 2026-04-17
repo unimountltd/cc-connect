@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -482,13 +483,57 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 	}
 	_, _, _, err := p.client.UpdateMessageContext(ctx, h.channel, h.timestamp,
 		slack.MsgOptionText(content, false))
-	if err != nil {
-		if strings.Contains(err.Error(), "message_not_found") {
-			return nil // message was deleted; nothing to update
-		}
-		return fmt.Errorf("slack: update message: %w", err)
+	if err == nil {
+		return nil
 	}
-	return nil
+	if strings.Contains(err.Error(), "message_not_found") {
+		return nil // message was deleted; nothing to update
+	}
+
+	// Slack tier-3 rate limit on chat.update is easy to hit during long,
+	// busy turns. If Slack tells us exactly how long to wait and it fits
+	// inside the caller's context deadline, do a single bounded retry so
+	// we recover without the progress card freezing.
+	var rle *slack.RateLimitedError
+	if errors.As(err, &rle) && rle.RetryAfter > 0 {
+		if p.waitWithinDeadline(ctx, rle.RetryAfter) {
+			_, _, _, retryErr := p.client.UpdateMessageContext(ctx, h.channel, h.timestamp,
+				slack.MsgOptionText(content, false))
+			if retryErr == nil {
+				return nil
+			}
+			if strings.Contains(retryErr.Error(), "message_not_found") {
+				return nil
+			}
+			return fmt.Errorf("slack: update message (after retry): %w", retryErr)
+		}
+	}
+	return fmt.Errorf("slack: update message: %w", err)
+}
+
+// waitWithinDeadline sleeps for d if and only if the remaining context
+// budget can cover it (with a small buffer). Returns true when it slept
+// fully, false when the wait would exceed the deadline (in which case the
+// caller should surface the original error instead of retrying).
+func (p *Platform) waitWithinDeadline(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return true
+	}
+	deadline, ok := ctx.Deadline()
+	if ok {
+		// Need d plus a small buffer to actually make the retry call.
+		if time.Until(deadline) < d+500*time.Millisecond {
+			return false
+		}
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func (p *Platform) DeletePreviewMessage(ctx context.Context, previewHandle any) error {

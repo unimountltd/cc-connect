@@ -2,8 +2,12 @@ package core
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 type suppressTestPlatform struct {
@@ -177,5 +181,181 @@ func TestCompactProgressWriter_DoesNotTransformToolResults(t *testing.T) {
 	}
 	if got := payload.Items[0].Text; got != raw {
 		t.Fatalf("tool result text = %q, want raw %q", got, raw)
+	}
+}
+
+// fakeRetryableErr mimics slack-go's *RateLimitedError shape: it carries a
+// Retryable() bool method so the writer's classifier can treat it as transient.
+type fakeRetryableErr struct{ msg string }
+
+func (e *fakeRetryableErr) Error() string   { return e.msg }
+func (e *fakeRetryableErr) Retryable() bool { return true }
+
+func TestIsTransientUpdateErr(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"deadline exceeded", context.DeadlineExceeded, true},
+		{"wrapped deadline", fmt.Errorf("slack: update: %w", context.DeadlineExceeded), true},
+		{"retryable error type", &fakeRetryableErr{msg: "rate limited"}, true},
+		{"wrapped retryable", fmt.Errorf("slack: update: %w", &fakeRetryableErr{msg: "x"}), true},
+		{"rate limit text", errors.New("slack: update: rate_limited"), true},
+		{"429 text", errors.New("HTTP status 429"), true},
+		{"503 text", errors.New("HTTP status 503"), true},
+		{"plain auth error", errors.New("invalid_auth"), false},
+		{"context canceled", context.Canceled, false},
+		{"message not found", errors.New("message_not_found"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isTransientUpdateErr(tc.err); got != tc.want {
+				t.Fatalf("isTransientUpdateErr(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// progressTransientErrPlatform is a Platform stub whose UpdateMessage returns
+// a scripted sequence of errors so we can exercise the writer's transient /
+// fatal classification without pulling in Slack's real client.
+type progressTransientErrPlatform struct {
+	stubPlatformEngine
+	mu      sync.Mutex
+	errs    []error // returned in order; remainder beyond len is nil
+	updates []string
+	starts  int
+}
+
+func (p *progressTransientErrPlatform) ProgressStyle() string { return "compact" }
+
+func (p *progressTransientErrPlatform) SendPreviewStart(_ context.Context, _ any, _ string) (any, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.starts++
+	return "handle", nil
+}
+
+func (p *progressTransientErrPlatform) UpdateMessage(_ context.Context, _ any, content string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.updates = append(p.updates, content)
+	idx := len(p.updates) - 1
+	if idx < len(p.errs) {
+		return p.errs[idx]
+	}
+	return nil
+}
+
+func (p *progressTransientErrPlatform) updateCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.updates)
+}
+
+func TestCompactProgressWriter_TransientErrorDoesNotDisable(t *testing.T) {
+	p := &progressTransientErrPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "slack"},
+		// The first AppendStructured call creates the preview handle via
+		// SendPreviewStart and does NOT hit UpdateMessage. Subsequent
+		// appends are the ones that exercise UpdateMessage, so errs[0] is
+		// the error returned for the 2nd append, errs[1] for the 3rd, etc.
+		errs: []error{context.DeadlineExceeded, nil},
+	}
+	w := newCompactProgressWriter(context.Background(), p, "ctx", "claudecode", LangEnglish, nil, "", "")
+
+	// 1st append: creates preview handle via SendPreviewStart; no UpdateMessage yet.
+	if ok := w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryToolUse, Tool: "Bash", Text: "ls"}, "tool ls"); !ok {
+		t.Fatal("first AppendStructured should succeed")
+	}
+	w.mu.Lock()
+	w.stopTickerLocked()
+	w.mu.Unlock()
+	if p.starts != 1 {
+		t.Fatalf("preview starts = %d, want 1", p.starts)
+	}
+
+	// 2nd append: fires UpdateMessage and returns context.DeadlineExceeded.
+	// The writer must treat this as transient: NOT disable itself.
+	if ok := w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryToolUse, Tool: "Bash", Text: "pwd"}, "tool pwd"); !ok {
+		t.Fatal("AppendStructured after transient error should still report ok")
+	}
+	w.mu.Lock()
+	if w.failed {
+		t.Fatal("writer should NOT be marked failed after transient UpdateMessage error")
+	}
+	if !w.inCooldown() {
+		t.Fatal("writer should be in cooldown after transient error")
+	}
+	// Simulate cooldown expiry so the next update is allowed through.
+	w.cooldownUntil = time.Time{}
+	w.stopTickerLocked()
+	w.mu.Unlock()
+
+	// 3rd append: now succeeds — writer has recovered.
+	if ok := w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryToolUse, Tool: "Bash", Text: "whoami"}, "tool whoami"); !ok {
+		t.Fatal("third AppendStructured should succeed after cooldown")
+	}
+	w.mu.Lock()
+	w.stopTickerLocked()
+	if w.failed {
+		t.Fatal("writer should still not be failed after recovery")
+	}
+	w.mu.Unlock()
+
+	if got := p.updateCount(); got != 2 {
+		t.Fatalf("UpdateMessage calls = %d, want 2 (2nd + 3rd appends)", got)
+	}
+}
+
+func TestCompactProgressWriter_PermanentErrorDisables(t *testing.T) {
+	p := &progressTransientErrPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "slack"},
+		errs:               []error{errors.New("invalid_auth")},
+	}
+	w := newCompactProgressWriter(context.Background(), p, "ctx", "claudecode", LangEnglish, nil, "", "")
+
+	// Bootstrap: create the preview handle.
+	_ = w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryToolUse, Tool: "Bash", Text: "ls"}, "tool ls")
+	w.mu.Lock()
+	w.stopTickerLocked()
+	w.mu.Unlock()
+
+	// This append triggers UpdateMessage -> invalid_auth (permanent).
+	ok := w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryToolUse, Tool: "Bash", Text: "pwd"}, "tool pwd")
+	if ok {
+		t.Fatal("AppendStructured should return false on permanent error")
+	}
+	w.mu.Lock()
+	if !w.failed {
+		t.Fatal("writer should be marked failed after permanent UpdateMessage error")
+	}
+	w.stopTickerLocked()
+	w.mu.Unlock()
+}
+
+func TestCompactProgressWriter_CooldownSkipsUpdate(t *testing.T) {
+	p := &progressTransientErrPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "slack"},
+	}
+	w := newCompactProgressWriter(context.Background(), p, "ctx", "claudecode", LangEnglish, nil, "", "")
+
+	// Bootstrap: create handle.
+	_ = w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryToolUse, Tool: "Bash", Text: "ls"}, "tool ls")
+	w.mu.Lock()
+	w.cooldownUntil = time.Now().Add(5 * time.Second)
+	w.stopTickerLocked()
+	w.mu.Unlock()
+
+	// While in cooldown, a further append must NOT hit the platform.
+	_ = w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryToolUse, Tool: "Bash", Text: "pwd"}, "tool pwd")
+	w.mu.Lock()
+	w.stopTickerLocked()
+	w.mu.Unlock()
+
+	if got := p.updateCount(); got != 0 {
+		t.Fatalf("UpdateMessage calls during cooldown = %d, want 0", got)
 	}
 }
