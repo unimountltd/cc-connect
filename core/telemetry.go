@@ -39,6 +39,7 @@ type TurnEvent struct {
 	SenderUserName string `json:"sender_user_name,omitempty"`
 	PlatformName   string `json:"platform_name,omitempty"`
 	ChatID         string `json:"chat_id,omitempty"`
+	ChatName       string `json:"chat_name,omitempty"`
 
 	// Message
 	MessageContent string `json:"message_content,omitempty"`

@@ -251,6 +251,7 @@ type queuedMessage struct {
 	userName      string // sender's display name for sender injection
 	msgPlatform   string // platform name for sender injection
 	msgSessionKey string // session key for extracting chat ID
+	msgChatName   string // human-readable chat/channel name for telemetry
 }
 
 // interactiveState tracks a running interactive agent session and its permission state.
@@ -289,6 +290,7 @@ type telemetryMsgCtx struct {
 	UserName     string
 	PlatformName string
 	ChatID       string
+	ChatName     string
 	Content      string
 }
 
@@ -1682,6 +1684,7 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		userName:      msg.UserName,
 		msgPlatform:   msg.Platform,
 		msgSessionKey: msg.SessionKey,
+		msgChatName:   msg.ChatName,
 	})
 	queueDepth := len(state.pendingMessages)
 	state.mu.Unlock()
@@ -2119,7 +2122,8 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 			UserID:       msg.UserID,
 			UserName:     msg.UserName,
 			PlatformName: msg.Platform,
-			ChatID:       msg.ChannelKey,
+			ChatID:       effectiveChannelID(msg),
+			ChatName:     msg.ChatName,
 			Content:      msg.Content,
 		}
 		retriable := e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone, msg.ReplyCtx, tmCtx)
@@ -3267,7 +3271,8 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 			UserID:       queued.userID,
 			UserName:     queued.userName,
 			PlatformName: queued.msgPlatform,
-			ChatID:       queued.msgSessionKey,
+			ChatID:       extractChannelID(queued.msgSessionKey),
+			ChatName:     queued.msgChatName,
 			Content:      queued.content,
 		}
 		e.processInteractiveEvents(state, session, sessions, sessionKey, "", time.Now(), stopTyping, sendDone, queued.replyCtx, qTmCtx)
@@ -3315,6 +3320,7 @@ func (e *Engine) emitTurnTelemetry(
 		SenderUserName:      tmCtx.UserName,
 		PlatformName:        tmCtx.PlatformName,
 		ChatID:              tmCtx.ChatID,
+		ChatName:            tmCtx.ChatName,
 		MessageContent:      tmCtx.Content,
 	}
 

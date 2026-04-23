@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -206,4 +207,101 @@ func (c *PostHogQueryClient) Query(hogql string) (*QueryResult, error) {
 		return nil, fmt.Errorf("telemetry: decode query response: %w", err)
 	}
 	return &QueryResult{Columns: result.Columns, Results: result.Results}, nil
+}
+
+// apiCall performs an authenticated JSON request against the PostHog API.
+// Returns the raw response body on success.
+func (c *PostHogQueryClient) apiCall(method, path string, reqBody interface{}) ([]byte, error) {
+	var body io.Reader
+	if reqBody != nil {
+		b, err := json.Marshal(reqBody)
+		if err != nil {
+			return nil, fmt.Errorf("telemetry: marshal %s %s: %w", method, path, err)
+		}
+		body = bytes.NewReader(b)
+	}
+
+	url := fmt.Sprintf("%s/api/projects/%s/%s", c.BaseURL, c.ProjectID, path)
+	req, err := http.NewRequest(method, url, body)
+	if err != nil {
+		return nil, fmt.Errorf("telemetry: new request %s %s: %w", method, path, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.PersonalAPIKey)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("telemetry: request %s %s: %w", method, path, err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("telemetry: %s %s returned %d: %s", method, path, resp.StatusCode, string(respBody))
+	}
+	return respBody, nil
+}
+
+// CreateDashboard creates a PostHog dashboard and returns its numeric ID.
+func (c *PostHogQueryClient) CreateDashboard(name, description string) (int, error) {
+	resp, err := c.apiCall("POST", "dashboards/", map[string]interface{}{
+		"name":        name,
+		"description": description,
+	})
+	if err != nil {
+		return 0, err
+	}
+	var out struct {
+		ID int `json:"id"`
+	}
+	if err := json.Unmarshal(resp, &out); err != nil {
+		return 0, fmt.Errorf("telemetry: decode dashboard: %w", err)
+	}
+	return out.ID, nil
+}
+
+// CreateHogQLInsight creates an insight backed by a HogQL query and attaches
+// it to the given dashboard. vizType controls the rendering: "table",
+// "bar", or "line".
+func (c *PostHogQueryClient) CreateHogQLInsight(dashboardID int, name, hogql, vizType string) error {
+	source := map[string]interface{}{
+		"kind":  "HogQLQuery",
+		"query": hogql,
+	}
+	var query map[string]interface{}
+	switch vizType {
+	case "bar", "line":
+		chartType := "ActionsBar"
+		if vizType == "line" {
+			chartType = "ActionsLineGraph"
+		}
+		query = map[string]interface{}{
+			"kind":   "DataVisualizationNode",
+			"source": source,
+			"chartSettings": map[string]interface{}{
+				"goalLines":        []interface{}{},
+				"seriesBreakdownColumn": nil,
+			},
+			"display": chartType,
+		}
+	default:
+		query = map[string]interface{}{
+			"kind":    "DataTableNode",
+			"source":  source,
+			"full":    true,
+		}
+	}
+	_, err := c.apiCall("POST", "insights/", map[string]interface{}{
+		"name":       name,
+		"query":      query,
+		"dashboards": []int{dashboardID},
+	})
+	return err
+}
+
+// DashboardURL returns the PostHog web URL for a dashboard ID.
+func (c *PostHogQueryClient) DashboardURL(dashboardID int) string {
+	webBase := strings.Replace(c.BaseURL, "://eu.i.", "://eu.", 1)
+	webBase = strings.Replace(webBase, "://us.i.", "://us.", 1)
+	return fmt.Sprintf("%s/project/%s/dashboard/%d", webBase, c.ProjectID, dashboardID)
 }

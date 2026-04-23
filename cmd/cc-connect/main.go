@@ -91,6 +91,9 @@ func main() {
 		case "usage":
 			runUsage(os.Args[2:])
 			return
+		case "dashboard":
+			runDashboard(os.Args[2:])
+			return
 		}
 	}
 
@@ -1240,6 +1243,12 @@ Commands:
     example          Print a complete annotated config.toml example
     format           Format the config file (alias: fmt)
     path             Print the resolved config file path
+
+  usage              Show usage stats from PostHog telemetry
+                     (--days N, --project NAME, --format table|json)
+
+  dashboard          Manage PostHog analytics dashboards
+    setup            Create Slack-usage dashboard (by channel, by user)
 
   update             Check for updates and upgrade the binary
                        (default: latest stable)

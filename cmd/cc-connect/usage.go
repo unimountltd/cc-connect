@@ -50,11 +50,11 @@ func runUsage(args []string) {
   properties.platform_name AS platform,
   properties.agent_type AS agent,
   count() AS turns,
-  sum(toInt64OrZero(toString(properties.input_tokens))) AS input_tokens,
-  sum(toInt64OrZero(toString(properties.output_tokens))) AS output_tokens,
-  sum(toInt64OrZero(toString(properties.cache_read_tokens))) AS cache_read,
-  sum(toInt64OrZero(toString(properties.cache_creation_tokens))) AS cache_write,
-  round(avg(toFloat64OrZero(toString(properties.turn_duration_ms))) / 1000, 1) AS avg_secs,
+  sum(toIntOrZero(toString(properties.input_tokens))) AS input_tokens,
+  sum(toIntOrZero(toString(properties.output_tokens))) AS output_tokens,
+  sum(toIntOrZero(toString(properties.cache_read_tokens))) AS cache_read,
+  sum(toIntOrZero(toString(properties.cache_creation_tokens))) AS cache_write,
+  round(avg(toFloatOrZero(toString(properties.turn_duration_ms))) / 1000, 1) AS avg_secs,
   countIf(properties.error_status = 'true') AS errors
 FROM events
 WHERE %s

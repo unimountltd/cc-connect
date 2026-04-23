@@ -246,6 +246,7 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 		msg := &core.Message{
 			SessionKey: sessionKey, Platform: "slack",
 			UserID: cmd.UserID, UserName: cmd.UserName,
+			ChatName: p.resolveChannelNameForMsg(cmd.ChannelID),
 			Content:  content,
 			ReplyCtx: replyContext{channel: cmd.ChannelID},
 		}
