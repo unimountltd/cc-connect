@@ -955,6 +955,12 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 
 	if _, err := bot.SendMessage(ctx, params); err != nil {
 		if strings.Contains(err.Error(), "can't parse") {
+			slog.Warn("telegram: HTML rejected by Telegram, sending as plain text",
+				"method", "Reply",
+				"error", err.Error(),
+				"html_prefix", truncateForLog(html, 200),
+				"html_len", len(html),
+			)
 			params.Text = content
 			params.ParseMode = ""
 			_, err = bot.SendMessage(ctx, params)
@@ -987,6 +993,12 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 
 	if _, err := bot.SendMessage(ctx, params); err != nil {
 		if strings.Contains(err.Error(), "can't parse") {
+			slog.Warn("telegram: HTML rejected by Telegram, sending as plain text",
+				"method", "Send",
+				"error", err.Error(),
+				"html_prefix", truncateForLog(html, 200),
+				"html_len", len(html),
+			)
 			params.Text = content
 			params.ParseMode = ""
 			_, err = bot.SendMessage(ctx, params)
@@ -1168,6 +1180,12 @@ func (p *Platform) SendWithButtons(ctx context.Context, rctx any, content string
 
 	if _, err := bot.SendMessage(ctx, params); err != nil {
 		if strings.Contains(err.Error(), "can't parse") {
+			slog.Warn("telegram: HTML rejected by Telegram, sending as plain text",
+				"method", "SendWithButtons",
+				"error", err.Error(),
+				"html_prefix", truncateForLog(html, 200),
+				"html_len", len(html),
+			)
 			params.Text = content
 			params.ParseMode = ""
 			_, err = bot.SendMessage(ctx, params)
@@ -1284,6 +1302,12 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 	sent, err := bot.SendMessage(ctx, params)
 	if err != nil {
 		if strings.Contains(err.Error(), "can't parse") {
+			slog.Warn("telegram: HTML rejected by Telegram, sending preview as plain text",
+				"method", "SendPreviewStart",
+				"error", err.Error(),
+				"html_prefix", truncateForLog(html, 200),
+				"html_len", len(html),
+			)
 			params.Text = content
 			params.ParseMode = ""
 			sent, err = bot.SendMessage(ctx, params)
@@ -1326,7 +1350,12 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 			return nil
 		}
 		if strings.Contains(errMsg, "can't parse") {
-			slog.Debug("telegram: UpdateMessage falling back to plain text", "full_html", html)
+			slog.Warn("telegram: HTML rejected by Telegram, editing as plain text",
+				"method", "UpdateMessage",
+				"error", errMsg,
+				"html_prefix", truncateForLog(html, 200),
+				"html_len", len(html),
+			)
 			params.Text = content
 			params.ParseMode = ""
 			if _, err2 := bot.EditMessageText(ctx, params); err2 != nil {
@@ -1405,16 +1434,20 @@ func truncateForLog(s string, maxLen int) string {
 	return string(r[:maxLen]) + "..."
 }
 
-// truncateTelegramBotDescription enforces Telegram's 256-character limit for
-// BotCommand.Description. Byte slicing breaks UTF-8 for CJK text and triggers
+const telegramBotCommandDescriptionLimit = 40
+
+// truncateTelegramBotDescription keeps Telegram command descriptions within a
+// conservative safety budget. Telegram documents a larger per-field limit, but
+// shorter descriptions avoid command menu registration failures when many
+// commands are installed. Byte slicing breaks UTF-8 for CJK text and triggers
 // "text must be encoded in UTF-8" from the API (#119).
 func truncateTelegramBotDescription(s string) string {
-	const max = 256
+	const max = telegramBotCommandDescriptionLimit
 	if utf8.RuneCountInString(s) <= max {
 		return s
 	}
 	r := []rune(s)
-	return string(r[:253]) + "..."
+	return string(r[:max-3]) + "..."
 }
 
 func (p *Platform) Stop() error {
@@ -1443,7 +1476,8 @@ func (p *Platform) RegisterCommands(commands []core.BotCommandInfo) error {
 		return err
 	}
 
-	// Telegram limits: max 100 commands, description max 256 chars
+	// Telegram limits: max 100 commands; keep descriptions conservatively short
+	// to avoid menu registration failures with larger command sets.
 	var tgCommands []models.BotCommand
 	seen := make(map[string]bool)
 	for _, c := range commands {
