@@ -127,6 +127,26 @@ func TestEngineSendToSessionWithAttachments_ProactiveNoSessions(t *testing.T) {
 	}
 }
 
+// waitForInteractiveCleanup polls until an interactiveState is removed.
+// /model dispatches the actual switch to a goroutine (performModelSwitchAsync),
+// which calls SetModel and then removes the state under interactiveMu. Waiting
+// on the cleanup gives both ordering and a happens-before edge for any agent
+// fields the goroutine wrote.
+func waitForInteractiveCleanup(t *testing.T, e *Engine, interactiveKey string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		e.interactiveMu.Lock()
+		_, exists := e.interactiveStates[interactiveKey]
+		e.interactiveMu.Unlock()
+		if !exists {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for interactive state %q to be cleaned up", interactiveKey)
+}
+
 func TestExecuteCardAction_ModelCleansUpWithInteractiveKey(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	agent := &stubModelModeAgent{model: "old"}
@@ -139,16 +159,10 @@ func TestExecuteCardAction_ModelCleansUpWithInteractiveKey(t *testing.T) {
 	e.interactiveMu.Unlock()
 
 	e.executeCardAction("/model", "new-model", sessionKey)
+	waitForInteractiveCleanup(t, e, sessionKey)
 
 	if agent.model != "new-model" {
 		t.Errorf("model = %q, want new-model", agent.model)
-	}
-
-	e.interactiveMu.Lock()
-	_, exists := e.interactiveStates[sessionKey]
-	e.interactiveMu.Unlock()
-	if exists {
-		t.Error("expected interactive state to be cleaned up after /model")
 	}
 }
 
@@ -182,6 +196,7 @@ func TestExecuteCardAction_ModelUsesWorkspaceContext(t *testing.T) {
 	wsSession.SetAgentSessionID("workspace-session", "test")
 
 	e.executeCardAction("/model", "switch 1", sessionKey)
+	waitForInteractiveCleanup(t, e, interactiveKey)
 
 	if wsAgent.model != "gpt-4.1" {
 		t.Fatalf("workspace agent model = %q, want gpt-4.1", wsAgent.model)
@@ -194,13 +209,6 @@ func TestExecuteCardAction_ModelUsesWorkspaceContext(t *testing.T) {
 	}
 	if got := e.sessions.GetOrCreateActive(sessionKey).AgentSessionID; got != "global-session" {
 		t.Fatalf("global session id = %q, want untouched", got)
-	}
-
-	e.interactiveMu.Lock()
-	_, exists := e.interactiveStates[interactiveKey]
-	e.interactiveMu.Unlock()
-	if exists {
-		t.Error("expected workspace interactive state to be cleaned up after /model")
 	}
 }
 

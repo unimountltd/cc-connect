@@ -72,15 +72,17 @@ func TestExecuteSessionCmdAndSend_NewStartsFreshAndDelivers(t *testing.T) {
 
 	// The new active session must not be the old one.
 	deadline := time.After(2 * time.Second)
+	var prompts []string
 	for {
 		active := e.sessions.GetOrCreateActive(key)
-		if active.ID != old.ID && len(agentSession.sentPrompts) > 0 {
+		prompts = agentSession.SentPrompts()
+		if active.ID != old.ID && len(prompts) > 0 {
 			break
 		}
 		select {
 		case <-deadline:
 			t.Fatalf("timed out: active=%s old=%s prompts=%v",
-				e.sessions.GetOrCreateActive(key).ID, old.ID, agentSession.sentPrompts)
+				e.sessions.GetOrCreateActive(key).ID, old.ID, prompts)
 		default:
 			time.Sleep(10 * time.Millisecond)
 		}
@@ -90,14 +92,14 @@ func TestExecuteSessionCmdAndSend_NewStartsFreshAndDelivers(t *testing.T) {
 		t.Errorf("old session agent id = %q, want cleared", got)
 	}
 	found := false
-	for _, prompt := range agentSession.sentPrompts {
+	for _, prompt := range prompts {
 		if prompt == "Work on issue #42" {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Errorf("agent did not receive kickoff prompt; got = %v", agentSession.sentPrompts)
+		t.Errorf("agent did not receive kickoff prompt; got = %v", prompts)
 	}
 }
 
@@ -161,14 +163,16 @@ func TestCmdNext_WithPromptStartsNewSessionAndDelivers(t *testing.T) {
 	e.handleCommand(p, msg, "/next fix the login bug")
 
 	deadline := time.After(2 * time.Second)
+	var prompts []string
 	for {
 		active := e.sessions.GetOrCreateActive(key)
-		if active.ID != old.ID && len(agentSession.sentPrompts) > 0 {
+		prompts = agentSession.SentPrompts()
+		if active.ID != old.ID && len(prompts) > 0 {
 			break
 		}
 		select {
 		case <-deadline:
-			t.Fatalf("timed out: prompts=%v", agentSession.sentPrompts)
+			t.Fatalf("timed out: prompts=%v", prompts)
 		default:
 			time.Sleep(10 * time.Millisecond)
 		}
@@ -177,8 +181,7 @@ func TestCmdNext_WithPromptStartsNewSessionAndDelivers(t *testing.T) {
 	if got := old.GetAgentSessionID(); got != "" {
 		t.Errorf("old session agent id = %q, want cleared", got)
 	}
-	got := agentSession.sentPrompts[0]
-	if got != "fix the login bug" {
+	if got := prompts[0]; got != "fix the login bug" {
 		t.Errorf("agent prompt = %q, want %q", got, "fix the login bug")
 	}
 }
