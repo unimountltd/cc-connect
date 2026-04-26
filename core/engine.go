@@ -12569,7 +12569,7 @@ func gitClone(repoURL, dest string) error {
 
 // ── Usage indicator ──────────────────────────────────────────
 
-const modelContextWindow = 1_000_000 // Claude's context window size in tokens (1M for Opus/Sonnet 4.6+)
+const modelContextWindow = 200_000 // generic fallback window for heuristic context estimates
 
 // usageIndicator returns a suffix like "\n[45s · 12.3k in · 8.5k out · ctx ~4%]".
 // totalInput is the cumulative token count across all API calls in the turn.
