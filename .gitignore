@@ -10,6 +10,12 @@
 *.test
 *.out
 
+# Release tarballs (build outputs)
+cc-connect-*.tar.gz
+
+# TypeScript incremental build cache
+web/tsconfig.tsbuildinfo
+
 # ============================================================================
 # Go workspace & tooling
 # ============================================================================
