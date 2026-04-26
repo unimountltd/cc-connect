@@ -12201,15 +12201,6 @@ func extractUserID(sessionKey string) string {
 	return ""
 }
 
-func stringSliceContains(ss []string, target string) bool {
-	for _, s := range ss {
-		if s == target {
-			return true
-		}
-	}
-	return false
-}
-
 func extractPlatformName(sessionKey string) string {
 	if i := strings.IndexByte(sessionKey, ':'); i >= 0 {
 		return sessionKey[:i]

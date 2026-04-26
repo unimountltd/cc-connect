@@ -345,10 +345,10 @@ const (
 
 func (p *Platform) readLoop(ws *websocket.Conn) {
 	ws.SetPongHandler(func(string) error {
-		ws.SetReadDeadline(time.Now().Add(pongTimeout))
+		_ = ws.SetReadDeadline(time.Now().Add(pongTimeout))
 		return nil
 	})
-	ws.SetReadDeadline(time.Now().Add(pongTimeout))
+	_ = ws.SetReadDeadline(time.Now().Add(pongTimeout))
 
 	for {
 		_, raw, err := ws.ReadMessage()
@@ -364,7 +364,7 @@ func (p *Platform) readLoop(ws *websocket.Conn) {
 			return
 		}
 
-		ws.SetReadDeadline(time.Now().Add(pongTimeout))
+		_ = ws.SetReadDeadline(time.Now().Add(pongTimeout))
 
 		var msg wsMessage
 		if err := json.Unmarshal(raw, &msg); err != nil {

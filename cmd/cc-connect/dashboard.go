@@ -142,7 +142,7 @@ func runDashboardSetup(args []string) {
 	fs := flag.NewFlagSet("dashboard setup", flag.ExitOnError)
 	name := fs.String("name", "cc-connect Slack Usage", "dashboard name")
 	description := fs.String("description", "Turns and tokens broken down by Slack channel and user.", "dashboard description")
-	fs.Parse(args)
+	_ = fs.Parse(args)
 
 	cfg, err := config.Load(resolveConfigPath(""))
 	if err != nil {
