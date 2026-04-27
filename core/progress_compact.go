@@ -622,13 +622,13 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 }
 
 // SetUsage stores token usage stats to include in the final compact progress card.
-func (w *compactProgressWriter) SetUsage(totalInput, outputTokens, contextTokens int, duration time.Duration) {
+func (w *compactProgressWriter) SetUsage(totalInput, outputTokens, contextTokens, contextWindow int, duration time.Duration) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.style != progressStyleCompact || !w.enabled || w.failed {
 		return
 	}
-	w.usageSuffix = usageIndicatorCompact(totalInput, outputTokens, contextTokens, duration)
+	w.usageSuffix = usageIndicatorCompact(totalInput, outputTokens, contextTokens, contextWindow, duration)
 }
 
 // UsageHandled returns true when the compact progress card includes the usage indicator,
@@ -641,7 +641,10 @@ func (w *compactProgressWriter) UsageHandled() bool {
 
 // usageIndicatorCompact returns an inline usage string like "[23s · 65.6k in · 461 out · ctx ~6%]"
 // without the leading newline (for embedding in progress card).
-func usageIndicatorCompact(totalInput, outputTokens, contextTokens int, duration time.Duration) string {
+func usageIndicatorCompact(totalInput, outputTokens, contextTokens, contextWindow int, duration time.Duration) string {
+	if contextWindow <= 0 {
+		contextWindow = defaultContextWindow
+	}
 	var parts []string
 	if duration >= time.Second {
 		parts = append(parts, formatDuration(duration))
@@ -657,7 +660,7 @@ func usageIndicatorCompact(totalInput, outputTokens, contextTokens int, duration
 		ctxBasis = totalInput
 	}
 	if ctxBasis >= 100 {
-		pct := ctxBasis * 100 / modelContextWindow
+		pct := ctxBasis * 100 / contextWindow
 		if pct > 100 {
 			pct = 100
 		}

@@ -3161,7 +3161,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			sdkPlausible := totalInput >= 100
 
 			if e.showContextIndicator && sdkPlausible {
-				cp.SetUsage(totalInput, event.OutputTokens, event.ContextTokens, turnDuration)
+				cp.SetUsage(totalInput, event.OutputTokens, event.ContextTokens, e.currentContextWindow(state), turnDuration)
 			}
 			cp.Finalize(ProgressCardStateCompleted)
 			// Use state.agentSession.CurrentSessionID() instead of event.SessionID.
@@ -3251,7 +3251,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			var usageSuffix string
 			if e.showContextIndicator && !isSilent && !cp.UsageHandled() {
 				if sdkPlausible {
-					usageSuffix = usageIndicator(totalInput, event.OutputTokens, event.ContextTokens, turnDuration)
+					usageSuffix = usageIndicator(totalInput, event.OutputTokens, event.ContextTokens, e.currentContextWindow(state), turnDuration)
 				} else if selfPct > 0 {
 					usageSuffix = fmt.Sprintf("\n[ctx: ~%d%%]", selfPct)
 				}
@@ -3737,7 +3737,7 @@ func (e *Engine) emitTurnTelemetry(
 		ctxBasis = result.InputTokens + result.CacheCreationTokens + result.CacheReadTokens
 	}
 	if ctxBasis > 0 {
-		pct := ctxBasis * 100 / modelContextWindow
+		pct := ctxBasis * 100 / e.currentContextWindow(state)
 		if pct > 100 {
 			pct = 100
 		}
@@ -12560,13 +12560,60 @@ func gitClone(repoURL, dest string) error {
 
 // ── Usage indicator ──────────────────────────────────────────
 
-const modelContextWindow = 200_000 // generic fallback window for heuristic context estimates
+const defaultContextWindow = 200_000 // fallback window when the model is unknown
+
+// currentContextWindow resolves the active model from the running session
+// (preferred) or the agent, then maps it to a context window via
+// contextWindowForModel.
+func (e *Engine) currentContextWindow(state *interactiveState) int {
+	model := ""
+	if state != nil && state.agentSession != nil {
+		if g, ok := state.agentSession.(interface{ GetModel() string }); ok {
+			model = strings.TrimSpace(g.GetModel())
+		}
+	}
+	if model == "" && e.agent != nil {
+		if g, ok := e.agent.(interface{ GetModel() string }); ok {
+			model = strings.TrimSpace(g.GetModel())
+		}
+	}
+	return contextWindowForModel(model)
+}
+
+// contextWindowForModel returns the context window in tokens for a model
+// identifier. Returns defaultContextWindow when the model is unknown.
+//
+// Recognized patterns (case-insensitive):
+//   - "[1m]" suffix or contains "1m"  → 1,000,000 (Anthropic 1M context variants)
+//   - "gpt-5" / "gpt-4.1"             → 400,000  (OpenAI 400k window)
+//   - "gemini-2.5" / "gemini-1.5"     → 1,000,000
+//   - everything else                 → defaultContextWindow
+func contextWindowForModel(model string) int {
+	m := strings.ToLower(strings.TrimSpace(model))
+	if m == "" {
+		return defaultContextWindow
+	}
+	if strings.Contains(m, "[1m]") || strings.HasSuffix(m, "-1m") || strings.Contains(m, "1m-") {
+		return 1_000_000
+	}
+	if strings.Contains(m, "gemini-2.5") || strings.Contains(m, "gemini-1.5") {
+		return 1_000_000
+	}
+	if strings.Contains(m, "gpt-5") || strings.Contains(m, "gpt-4.1") {
+		return 400_000
+	}
+	return defaultContextWindow
+}
 
 // usageIndicator returns a suffix like "\n[45s · 12.3k in · 8.5k out · ctx ~4%]".
 // totalInput is the cumulative token count across all API calls in the turn.
 // contextTokens is the last API request's total input (actual context size);
 // when > 0 it is used for ctx%, otherwise totalInput is used as-is.
-func usageIndicator(totalInput, outputTokens, contextTokens int, duration time.Duration) string {
+// contextWindow is the model's full context size in tokens.
+func usageIndicator(totalInput, outputTokens, contextTokens, contextWindow int, duration time.Duration) string {
+	if contextWindow <= 0 {
+		contextWindow = defaultContextWindow
+	}
 	var parts []string
 	if duration >= time.Second {
 		parts = append(parts, formatDuration(duration))
@@ -12582,7 +12629,7 @@ func usageIndicator(totalInput, outputTokens, contextTokens int, duration time.D
 		ctxBasis = totalInput
 	}
 	if ctxBasis >= 100 {
-		pct := ctxBasis * 100 / modelContextWindow
+		pct := ctxBasis * 100 / contextWindow
 		if pct > 100 {
 			pct = 100
 		}
