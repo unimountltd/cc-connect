@@ -33,7 +33,9 @@ type claudeSession struct {
 	stdinMu         sync.Mutex
 	events          chan core.Event
 	orphanEvents    chan core.Event // events arriving outside an active Send() turn (SDK self-fired wakeups); see core/sdk_orphan.go
-	inTurn          atomic.Bool     // true between Send() and the matching EventResult/EventError; routes events to events vs orphanEvents
+	inTurn          atomic.Bool     // hint set by Send()/cleared by terminal events; first event of a new turn snapshots it into turnChannel
+	turnChannel     chan core.Event // chosen at first event of each turn, released on terminal event; prevents a concurrent Send during an orphan turn from rerouting the tail
+	turnMu          sync.Mutex      // guards turnChannel
 	sessionID       atomic.Value // stores string
 	permissionMode  atomic.Value // stores string
 	autoApprove     atomic.Bool
@@ -267,11 +269,11 @@ func (cs *claudeSession) finishReadLoop(waitErrCh <-chan error, stderrBuf *bytes
 		if stderrMsg != "" {
 			kind := core.ClassifyAnthropicError(stderrMsg)
 			slog.Error("claudeSession: process failed", "error", err, "stderr", stderrMsg, "kind", kind)
+			// emitEvent handles channel routing + inTurn lifecycle; nothing
+			// more to do for the in-flight turn (if any) here.
 			cs.emitEvent(core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg), ErrorKind: kind})
 		}
 	}
-	// Process exited — any pending turn is now done.
-	cs.inTurn.Store(false)
 	// INVARIANT: readLoop must close cs.events, cs.orphanEvents, and cs.done
 	// exactly once on every termination path. Callers (engine event loop and
 	// orphan handler) rely on these closures to observe session end.
@@ -298,7 +300,9 @@ func (cs *claudeSession) handleReadLoopScanErr(err error, waitDone <-chan struct
 	}
 
 	slog.Error("claudeSession: scanner error", "error", err)
-	cs.inTurn.Store(false)
+	// emitEvent routes the EventError to whichever channel the in-flight
+	// turn was on (snapshotted at first event); for an active turn it also
+	// clears cs.inTurn so the next turn re-snapshots fresh.
 	cs.emitEvent(core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)})
 }
 
@@ -445,11 +449,10 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 			ErrorKind: kind,
 			SessionID: cs.CurrentSessionID(),
 		}
-		// Terminal — clear inTurn AFTER routing so the EventError lands on
-		// whichever channel the turn was running on, then subsequent events
-		// route as orphans.
+		// Terminal — emitEvent routes to the snapshotted channel and
+		// (if it was the active channel) clears cs.inTurn so the next
+		// turn re-snapshots fresh.
 		cs.emitEvent(evt)
-		cs.inTurn.Store(false)
 		return
 	}
 
@@ -480,10 +483,9 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 		OutputTokens:        outputTokens,
 		ContextTokens:       int(cs.lastCtxTokens.Load()),
 	}
-	// Terminal — emit on the active channel, then clear inTurn so any
-	// subsequent SDK self-fired events route to the orphan channel.
+	// Terminal — emitEvent routes to the snapshotted channel and clears
+	// cs.inTurn iff this turn was on the active channel.
 	cs.emitEvent(evt)
-	cs.inTurn.Store(false)
 }
 
 func (cs *claudeSession) handleControlRequest(raw map[string]any) {
@@ -744,22 +746,49 @@ func (cs *claudeSession) OrphanEvents() <-chan core.Event {
 }
 
 // emitEvent routes an event to either the active-turn channel (cs.events) or
-// the orphan channel (cs.orphanEvents) based on whether a Send() turn is in
-// progress. Exposes the inTurn split via a single chokepoint so every emission
-// site stays uniform.
+// the orphan channel (cs.orphanEvents). Picks the channel at the FIRST event
+// of each turn (snapshotting cs.inTurn at that moment) and locks it in until
+// the terminal event releases it. This way a concurrent Send during an
+// in-flight orphan turn cannot reroute the orphan's tail to the active
+// channel mid-stream.
+//
+// Also owns the lifecycle of cs.inTurn: only the terminal event of an
+// ACTIVE-channel turn clears it. Terminal events on the orphan channel
+// leave inTurn alone, so a Send that arrived while the SDK was self-firing
+// is still recognised when the subprocess finally processes the user's
+// prompt.
 //
 // Falls back to cs.events when cs.orphanEvents is nil so unit tests that
 // construct claudeSession by hand (without invoking newClaudeSession) continue
 // to receive every event on the single channel they expect.
 func (cs *claudeSession) emitEvent(evt core.Event) {
-	ch := cs.events
-	if cs.inTurn.Load() == false && cs.orphanEvents != nil {
-		ch = cs.orphanEvents
+	cs.turnMu.Lock()
+	if cs.turnChannel == nil {
+		if cs.inTurn.Load() || cs.orphanEvents == nil {
+			cs.turnChannel = cs.events
+		} else {
+			cs.turnChannel = cs.orphanEvents
+		}
 	}
+	ch := cs.turnChannel
+	if isTerminalEventType(evt.Type) {
+		if ch == cs.events {
+			cs.inTurn.Store(false)
+		}
+		cs.turnChannel = nil
+	}
+	cs.turnMu.Unlock()
+
 	select {
 	case ch <- evt:
 	case <-cs.ctx.Done():
 	}
+}
+
+// isTerminalEventType reports whether the event ends a turn (releases the
+// snapshotted turnChannel so the next event can re-snapshot fresh).
+func isTerminalEventType(t core.EventType) bool {
+	return t == core.EventResult || t == core.EventError
 }
 
 func (cs *claudeSession) CurrentSessionID() string {

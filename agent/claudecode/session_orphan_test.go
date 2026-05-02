@@ -111,6 +111,87 @@ func TestSession_InTurnFallbackWhenOrphanNil(t *testing.T) {
 	}
 }
 
+// TestSession_TurnChannelLockedAtFirstEvent is the regression test for the
+// codex P2 finding: a concurrent Send during an in-flight orphan turn used
+// to flip cs.inTurn=true and reroute the orphan tail (text + EventResult)
+// to cs.events, so the foreground processInteractiveEvents loop consumed
+// the wakeup result as if it were the user's reply. Channel-lock at first
+// event prevents this.
+func TestSession_TurnChannelLockedAtFirstEvent(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cs := &claudeSession{
+		events:       make(chan core.Event, 8),
+		orphanEvents: make(chan core.Event, 8),
+		ctx:          ctx,
+	}
+	cs.alive.Store(true)
+
+	// Orphan turn starts (inTurn=false at the time of first event).
+	cs.handleAssistant(map[string]any{
+		"message": map[string]any{
+			"content": []any{
+				map[string]any{"type": "text", "text": "first orphan event"},
+			},
+		},
+	})
+
+	// Mid-stream, a user Send arrives — flips inTurn=true.
+	cs.inTurn.Store(true)
+
+	// Two more events of the SAME orphan turn arrive. Pre-fix these would
+	// have been routed to cs.events because emitEvent re-checked inTurn on
+	// every event. Post-fix they stay on cs.orphanEvents (channel locked
+	// at first event).
+	cs.handleAssistant(map[string]any{
+		"message": map[string]any{
+			"content": []any{
+				map[string]any{"type": "text", "text": "tail of orphan"},
+			},
+		},
+	})
+	cs.handleResult(map[string]any{"type": "result", "result": "wakeup done"})
+
+	// All three orphan events should be on cs.orphanEvents.
+	wantOrphan := []string{"first orphan event", "tail of orphan", "wakeup done"}
+	for i, want := range wantOrphan {
+		select {
+		case evt := <-cs.orphanEvents:
+			got := evt.Content
+			if i == 2 && evt.Type != core.EventResult {
+				t.Fatalf("orphan terminal: type=%v, want EventResult", evt.Type)
+			}
+			if got != want {
+				t.Fatalf("orphan event %d: content=%q, want %q", i, got, want)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("orphan event %d not delivered (channel-lock regression)", i)
+		}
+	}
+	if got := drainOne(cs.events); got != nil {
+		t.Fatalf("orphan tail leaked to active channel: %+v", got)
+	}
+
+	// Now that the orphan turn ended (terminal event released turnChannel),
+	// the next event re-snapshots — and inTurn=true → routes to cs.events.
+	cs.handleAssistant(map[string]any{
+		"message": map[string]any{
+			"content": []any{
+				map[string]any{"type": "text", "text": "user reply"},
+			},
+		},
+	})
+	select {
+	case evt := <-cs.events:
+		if evt.Content != "user reply" {
+			t.Fatalf("user-turn event content = %q", evt.Content)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("user-turn event not delivered after orphan ended")
+	}
+}
+
 // TestSession_OrphanEventsAccessor returns the channel the engine reads.
 func TestSession_OrphanEventsAccessor(t *testing.T) {
 	cs := &claudeSession{orphanEvents: make(chan core.Event, 1)}

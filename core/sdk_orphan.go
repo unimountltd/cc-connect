@@ -150,6 +150,7 @@ func (e *Engine) flushOrphanTurn(state *interactiveState, turn *orphanTurn, errO
 	platform := state.platform
 	replyCtx := state.replyCtx
 	sessionKey := state.canonicalSessionKey
+	sm := state.sessionManager
 	state.mu.Unlock()
 	if platform == nil {
 		slog.Warn("orphan: no platform for session, dropping wakeup turn", "session_key", sessionKey, "text_parts", len(turn.text))
@@ -178,8 +179,14 @@ func (e *Engine) flushOrphanTurn(state *interactiveState, turn *orphanTurn, errO
 	// late than not at all.
 	deadline := time.Now().Add(orphanWaitForLockMax)
 	gotLock := false
-	if sm := e.sessionManager(); sm != nil {
-		if sess := sm.byKey(sessionKey); sess != nil {
+	// Prefer the workspace-specific SessionManager that owned this turn
+	// (multi-workspace mode); fall back to the engine's primary one.
+	mgr := sm
+	if mgr == nil {
+		mgr = e.sessionManager()
+	}
+	if mgr != nil {
+		if sess := mgr.byKey(sessionKey); sess != nil {
 			for time.Now().Before(deadline) {
 				if sess.TryLock() {
 					gotLock = true

@@ -284,8 +284,9 @@ type interactiveState struct {
 	platform               Platform
 	replyCtx               any
 	workspaceDir           string
-	canonicalSessionKey    string // platform-prefixed key without workspace prefix; used by core/sdk_orphan.go to route SDK self-fired wakeups back to the right channel
-	injectPrompt           string // custom inject prompt for progress card display
+	canonicalSessionKey    string          // platform-prefixed key without workspace prefix; used by core/sdk_orphan.go to route SDK self-fired wakeups back to the right channel
+	sessionManager         *SessionManager // workspace-specific manager owning this turn's Session; used by core/sdk_orphan.go for the orphan-render lock
+	injectPrompt           string          // custom inject prompt for progress card display
 	agent                  Agent
 	mu                     sync.Mutex
 	stopCh                 chan struct{}
@@ -2211,6 +2212,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state.platform = p
 	state.replyCtx = msg.ReplyCtx
 	state.canonicalSessionKey = msg.SessionKey
+	state.sessionManager = sessions
 	state.injectPrompt = e.getInjectPrompt(msg.SessionKey)
 	if msg.SkillInvoked != "" {
 		state.skillsInvokedThisTurn = append(state.skillsInvokedThisTurn, msg.SkillInvoked)
