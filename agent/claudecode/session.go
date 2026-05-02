@@ -340,7 +340,15 @@ func (cs *claudeSession) handleReadLoopLine(line string) {
 func (cs *claudeSession) handleSystem(raw map[string]any) {
 	if sid, ok := raw["session_id"].(string); ok && sid != "" {
 		cs.sessionID.Store(sid)
-		cs.emitEvent(core.Event{Type: core.EventText, SessionID: sid})
+		// The startup system event is metadata (session_id propagation),
+		// NOT part of any turn. Bypass emitEvent: it has no terminal-event
+		// counterpart, so going through the channel-lock path would
+		// permanently snapshot turnChannel based on whatever cs.inTurn
+		// happened to be at startup, mis-routing every subsequent real turn.
+		select {
+		case cs.events <- core.Event{Type: core.EventText, SessionID: sid}:
+		case <-cs.ctx.Done():
+		}
 	}
 }
 

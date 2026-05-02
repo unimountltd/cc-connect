@@ -192,6 +192,76 @@ func TestSession_TurnChannelLockedAtFirstEvent(t *testing.T) {
 	}
 }
 
+// TestSession_StartupSystemEventDoesNotLockTurnChannel is the regression
+// test for the codex P1 finding on commit 81f89798: Claude's initial
+// `system` event arrives before any Send(), so cs.inTurn=false. Prior to
+// the fix, that startup event went through emitEvent, snapshot
+// cs.orphanEvents into turnChannel, and never released it (no terminal
+// event for a startup notification). Every subsequent real user turn was
+// then routed to the orphan channel and the foreground loop hung
+// indefinitely.
+//
+// The fix routes handleSystem directly to cs.events, bypassing the
+// turn-channel lock. This test exercises the exact sequence: system
+// event, then a Send-driven user turn that must land on cs.events.
+func TestSession_StartupSystemEventDoesNotLockTurnChannel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cs := &claudeSession{
+		events:       make(chan core.Event, 8),
+		orphanEvents: make(chan core.Event, 8),
+		ctx:          ctx,
+	}
+	cs.alive.Store(true)
+
+	// Startup: subprocess emits the initial system event with session_id
+	// before any Send(). inTurn is still false at this moment.
+	cs.handleSystem(map[string]any{"session_id": "s-startup"})
+
+	// The startup metadata must land on cs.events (it's session-id
+	// propagation; the engine's session-tracking path reads it).
+	select {
+	case evt := <-cs.events:
+		if evt.SessionID != "s-startup" {
+			t.Fatalf("startup event session_id = %q", evt.SessionID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("startup system event not delivered to cs.events")
+	}
+	if got := drainOne(cs.orphanEvents); got != nil {
+		t.Fatalf("startup event leaked to orphan channel: %+v", got)
+	}
+
+	// First real Send-driven turn. Pre-fix this would route to orphan
+	// because turnChannel was permanently locked by the startup event.
+	cs.inTurn.Store(true)
+	cs.handleAssistant(map[string]any{
+		"message": map[string]any{
+			"content": []any{
+				map[string]any{"type": "text", "text": "first user turn"},
+			},
+		},
+	})
+	cs.handleResult(map[string]any{"type": "result", "result": "done"})
+
+	// Both events of the user turn must land on cs.events.
+	for i, want := range []string{"first user turn", "done"} {
+		select {
+		case evt := <-cs.events:
+			content := evt.Content
+			if content != want {
+				t.Fatalf("user-turn event %d content = %q, want %q", i, content, want)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("user-turn event %d not delivered to cs.events (channel-lock regression)", i)
+		}
+	}
+	if got := drainOne(cs.orphanEvents); got != nil {
+		t.Fatalf("user turn leaked to orphan channel: %+v", got)
+	}
+}
+
 // TestSession_OrphanEventsAccessor returns the channel the engine reads.
 func TestSession_OrphanEventsAccessor(t *testing.T) {
 	cs := &claudeSession{orphanEvents: make(chan core.Event, 1)}
