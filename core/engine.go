@@ -284,6 +284,7 @@ type interactiveState struct {
 	platform               Platform
 	replyCtx               any
 	workspaceDir           string
+	canonicalSessionKey    string // platform-prefixed key without workspace prefix; used by core/sdk_orphan.go to route SDK self-fired wakeups back to the right channel
 	injectPrompt           string // custom inject prompt for progress card display
 	agent                  Agent
 	mu                     sync.Mutex
@@ -2209,6 +2210,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state.mu.Lock()
 	state.platform = p
 	state.replyCtx = msg.ReplyCtx
+	state.canonicalSessionKey = msg.SessionKey
 	state.injectPrompt = e.getInjectPrompt(msg.SessionKey)
 	if msg.SkillInvoked != "" {
 		state.skillsInvokedThisTurn = append(state.skillsInvokedThisTurn, msg.SkillInvoked)
@@ -2652,6 +2654,12 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
 	state = newState
 	e.interactiveStates[sessionKey] = state
+
+	// Spawn the SDK orphan-event handler for this session if the agent
+	// surfaces a separate orphan channel (Claude Code's ScheduleWakeup
+	// self-fires arrive there). No-op for agents that don't implement
+	// OrphanEventEmitter. See core/sdk_orphan.go.
+	e.startOrphanHandlerForSession(state)
 
 	slog.Info("session spawned", "session_key", sessionKey, "agent_session", session.GetAgentSessionID(), "is_resume", isResume, "elapsed", startElapsed)
 

@@ -32,6 +32,8 @@ type claudeSession struct {
 	stdin           io.WriteCloser
 	stdinMu         sync.Mutex
 	events          chan core.Event
+	orphanEvents    chan core.Event // events arriving outside an active Send() turn (SDK self-fired wakeups); see core/sdk_orphan.go
+	inTurn          atomic.Bool     // true between Send() and the matching EventResult/EventError; routes events to events vs orphanEvents
 	sessionID       atomic.Value // stores string
 	permissionMode  atomic.Value // stores string
 	autoApprove     atomic.Bool
@@ -192,6 +194,7 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 		cmd:                 cmd,
 		stdin:               stdin,
 		events:              make(chan core.Event, 64),
+		orphanEvents:        make(chan core.Event, 64),
 		workDir:             workDir,
 		ctx:                 sessionCtx,
 		cancel:              cancel,
@@ -264,17 +267,20 @@ func (cs *claudeSession) finishReadLoop(waitErrCh <-chan error, stderrBuf *bytes
 		if stderrMsg != "" {
 			kind := core.ClassifyAnthropicError(stderrMsg)
 			slog.Error("claudeSession: process failed", "error", err, "stderr", stderrMsg, "kind", kind)
-			evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg), ErrorKind: kind}
-			select {
-			case cs.events <- evt:
-			case <-cs.ctx.Done():
-				// INVARIANT: readLoop must close cs.events and cs.done exactly once
-				// on every termination path. Callers (engine event loop) rely on
-				// these closures to observe session end.
-			}
+			cs.emitEvent(core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg), ErrorKind: kind})
 		}
 	}
+	// Process exited — any pending turn is now done.
+	cs.inTurn.Store(false)
+	// INVARIANT: readLoop must close cs.events, cs.orphanEvents, and cs.done
+	// exactly once on every termination path. Callers (engine event loop and
+	// orphan handler) rely on these closures to observe session end.
+	// orphanEvents may be nil in unit tests that construct claudeSession by
+	// hand (without invoking newClaudeSession); skip the close in that case.
 	close(cs.events)
+	if cs.orphanEvents != nil {
+		close(cs.orphanEvents)
+	}
 	close(cs.done)
 }
 
@@ -292,12 +298,8 @@ func (cs *claudeSession) handleReadLoopScanErr(err error, waitDone <-chan struct
 	}
 
 	slog.Error("claudeSession: scanner error", "error", err)
-	evt := core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
-	select {
-	case cs.events <- evt:
-	case <-cs.ctx.Done():
-		return
-	}
+	cs.inTurn.Store(false)
+	cs.emitEvent(core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)})
 }
 
 func (cs *claudeSession) handleReadLoopLine(line string) {
@@ -334,12 +336,7 @@ func (cs *claudeSession) handleReadLoopLine(line string) {
 func (cs *claudeSession) handleSystem(raw map[string]any) {
 	if sid, ok := raw["session_id"].(string); ok && sid != "" {
 		cs.sessionID.Store(sid)
-		evt := core.Event{Type: core.EventText, SessionID: sid}
-		select {
-		case cs.events <- evt:
-		case <-cs.ctx.Done():
-			return
-		}
+		cs.emitEvent(core.Event{Type: core.EventText, SessionID: sid})
 	}
 }
 
@@ -381,29 +378,14 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 				continue
 			}
 			inputSummary := summarizeInput(toolName, item["input"])
-			evt := core.Event{Type: core.EventToolUse, ToolName: toolName, ToolInput: inputSummary}
-			select {
-			case cs.events <- evt:
-			case <-cs.ctx.Done():
-				return
-			}
+			cs.emitEvent(core.Event{Type: core.EventToolUse, ToolName: toolName, ToolInput: inputSummary})
 		case "thinking":
 			if thinking, ok := item["thinking"].(string); ok && thinking != "" {
-				evt := core.Event{Type: core.EventThinking, Content: thinking}
-				select {
-				case cs.events <- evt:
-				case <-cs.ctx.Done():
-					return
-				}
+				cs.emitEvent(core.Event{Type: core.EventThinking, Content: thinking})
 			}
 		case "text":
 			if text, ok := item["text"].(string); ok && text != "" {
-				evt := core.Event{Type: core.EventText, Content: text}
-				select {
-				case cs.events <- evt:
-				case <-cs.ctx.Done():
-					return
-				}
+				cs.emitEvent(core.Event{Type: core.EventText, Content: text})
 			}
 		}
 	}
@@ -463,10 +445,11 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 			ErrorKind: kind,
 			SessionID: cs.CurrentSessionID(),
 		}
-		select {
-		case cs.events <- evt:
-		case <-cs.ctx.Done():
-		}
+		// Terminal — clear inTurn AFTER routing so the EventError lands on
+		// whichever channel the turn was running on, then subsequent events
+		// route as orphans.
+		cs.emitEvent(evt)
+		cs.inTurn.Store(false)
 		return
 	}
 
@@ -497,11 +480,10 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 		OutputTokens:        outputTokens,
 		ContextTokens:       int(cs.lastCtxTokens.Load()),
 	}
-	select {
-	case cs.events <- evt:
-	case <-cs.ctx.Done():
-		return
-	}
+	// Terminal — emit on the active channel, then clear inTurn so any
+	// subsequent SDK self-fired events route to the orphan channel.
+	cs.emitEvent(evt)
+	cs.inTurn.Store(false)
 }
 
 func (cs *claudeSession) handleControlRequest(raw map[string]any) {
@@ -557,11 +539,7 @@ func (cs *claudeSession) handleControlRequest(raw map[string]any) {
 		evt.Questions = parseUserQuestions(input)
 	}
 
-	select {
-	case cs.events <- evt:
-	case <-cs.ctx.Done():
-		return
-	}
+	cs.emitEvent(evt)
 }
 
 // Send writes a user message (with optional images and files) to the Claude process stdin.
@@ -573,11 +551,28 @@ func (cs *claudeSession) Send(prompt string, images []core.ImageAttachment, file
 		return fmt.Errorf("session process is not running")
 	}
 
+	// Mark turn active BEFORE writing to stdin so the readLoop routes
+	// every assistant event for this turn to cs.events (active channel).
+	// Cleared by handleResult on EventResult/terminal EventError. If the
+	// stdin write fails below we revert the flag so a never-started turn
+	// doesn't leave inTurn stuck true.
+	cs.inTurn.Store(true)
+	sent := false
+	defer func() {
+		if !sent {
+			cs.inTurn.Store(false)
+		}
+	}()
+
 	if len(images) == 0 && len(files) == 0 {
-		return cs.writeJSON(map[string]any{
+		if err := cs.writeJSON(map[string]any{
 			"type":    "user",
 			"message": map[string]any{"role": "user", "content": prompt},
-		})
+		}); err != nil {
+			return err
+		}
+		sent = true
+		return nil
 	}
 
 	attachDir := filepath.Join(cs.workDir, ".cc-connect", "attachments")
@@ -632,10 +627,14 @@ func (cs *claudeSession) Send(prompt string, images []core.ImageAttachment, file
 	}
 	parts = append(parts, map[string]any{"type": "text", "text": textPart})
 
-	return cs.writeJSON(map[string]any{
+	if err := cs.writeJSON(map[string]any{
 		"type":    "user",
 		"message": map[string]any{"role": "user", "content": parts},
-	})
+	}); err != nil {
+		return err
+	}
+	sent = true
+	return nil
 }
 
 func extFromMime(mime string) string {
@@ -732,6 +731,35 @@ func (cs *claudeSession) SetLiveMode(mode string) bool {
 
 func (cs *claudeSession) Events() <-chan core.Event {
 	return cs.events
+}
+
+// OrphanEvents returns the channel of events that arrived outside an active
+// Send() turn. These are SDK self-fired turns (Claude Code's in-process
+// ScheduleWakeup or similar). The engine starts a dedicated reader for this
+// channel; cc-connect's orphan handler then renders them to the user.
+//
+// Satisfies core.OrphanEventEmitter.
+func (cs *claudeSession) OrphanEvents() <-chan core.Event {
+	return cs.orphanEvents
+}
+
+// emitEvent routes an event to either the active-turn channel (cs.events) or
+// the orphan channel (cs.orphanEvents) based on whether a Send() turn is in
+// progress. Exposes the inTurn split via a single chokepoint so every emission
+// site stays uniform.
+//
+// Falls back to cs.events when cs.orphanEvents is nil so unit tests that
+// construct claudeSession by hand (without invoking newClaudeSession) continue
+// to receive every event on the single channel they expect.
+func (cs *claudeSession) emitEvent(evt core.Event) {
+	ch := cs.events
+	if cs.inTurn.Load() == false && cs.orphanEvents != nil {
+		ch = cs.orphanEvents
+	}
+	select {
+	case ch <- evt:
+	case <-cs.ctx.Done():
+	}
 }
 
 func (cs *claudeSession) CurrentSessionID() string {
