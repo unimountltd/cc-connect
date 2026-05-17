@@ -364,7 +364,7 @@ func main() {
 
 		// Wire display truncation settings (includes legacy quiet → display mapping)
 		{
-			tm, tool, tmlen, toollen := config.EffectiveDisplay(cfg, &proj)
+			_, tm, tool, tmlen, toollen := config.EffectiveDisplay(cfg, &proj)
 			engine.SetDisplayConfig(core.DisplayCfg{
 				ThinkingMessages: tm,
 				ThinkingMaxLen:   tmlen,
@@ -465,7 +465,7 @@ func main() {
 		}
 
 		engine.SetDisplaySaveFunc(func(thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
-			return config.SaveDisplayConfig(thinkingMessages, thinkingMaxLen, toolMaxLen, toolMessages)
+			return config.SaveDisplayConfig(nil, thinkingMessages, thinkingMaxLen, toolMaxLen, toolMessages)
 		})
 
 		// Wire idle timeout
@@ -1407,7 +1407,7 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	}
 
 	// Reload display config (includes legacy quiet → display mapping)
-	tm, tool, tmlen, toollen := config.EffectiveDisplay(cfg, proj)
+	_, tm, tool, tmlen, toollen := config.EffectiveDisplay(cfg, proj)
 	engine.SetDisplayConfig(core.DisplayCfg{
 		ThinkingMessages: tm,
 		ThinkingMaxLen:   tmlen,
