@@ -2,6 +2,7 @@
 # Binary outputs
 # ============================================================================
 /cc-connect
+cc-connect.bak-*
 *.exe
 *.exe~
 *.dll
@@ -9,6 +10,7 @@
 *.dylib
 *.test
 *.out
+*.old
 
 # Release tarballs (build outputs)
 cc-connect-*.tar.gz
@@ -42,9 +44,13 @@ vendor/
 # ============================================================================
 # Runtime configuration (contains secrets)
 config.toml
-config.test.toml
+config.*.toml
+!config.example.toml
 .env
 *.local.toml
+
+# Instance lock files (created at startup, released on shutdown)
+*.toml.lock
 
 # CC-Connect runtime state
 .cc-connect/
@@ -139,3 +145,5 @@ Desktop.ini
 *.pfx
 secrets/
 credentials/
+
+.codex

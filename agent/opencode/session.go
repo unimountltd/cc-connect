@@ -10,7 +10,8 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"path/filepath"
+"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -34,6 +35,7 @@ type opencodeSession struct {
 	cancel   context.CancelFunc
 	wg       sync.WaitGroup
 	alive    atomic.Bool
+	expectingContinue atomic.Bool // true when compaction_continue received, waiting for next step
 }
 
 func newOpencodeSession(ctx context.Context, cmd, workDir, model, mode, resumeID string, extraEnv []string) (*opencodeSession, error) {
@@ -168,27 +170,15 @@ func (s *opencodeSession) buildRunArgs(prompt string, imagePaths []string, chatI
 		args = append(args, "--file", imagePath)
 	}
 
-	// Append prompt as positional arg.
-	args = append(args, prompt)
+	// Use "--" to separate flags from the positional prompt so that
+	// --file (yargs [array]) does not greedily consume the prompt text.
+	args = append(args, "--", prompt)
 	return args
 }
 
 func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
 	defer s.wg.Done()
-	defer func() {
-		if err := cmd.Wait(); err != nil {
-			stderrMsg := stderrBuf.String()
-			if stderrMsg != "" {
-				slog.Error("opencodeSession: process failed", "error", err, "stderr", stderrMsg)
-				evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
-				select {
-				case s.events <- evt:
-				case <-s.ctx.Done():
-					return
-				}
-			}
-		}
-	}()
+	defer func() { _ = cmd.Wait() }()
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
@@ -216,10 +206,36 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 		case <-s.ctx.Done():
 			return
 		}
+		return
+	}
+
+	stderrMsg := stderrBuf.String()
+	if stderrMsg != "" {
+		slog.Error("opencodeSession: process error", "stderr", truncate(stderrMsg, 500))
+		if strings.Contains(stderrMsg, "Session not found") {
+			s.chatID.Store("")
+			slog.Warn("opencodeSession: cleared stale session ID")
+		}
+		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
+		select {
+		case s.events <- evt:
+		case <-s.ctx.Done():
+		}
+		return
+	}
+
+// Check if we received compaction_continue before readLoop ended.
+	// If so, OpenCode will continue with a new turn - do NOT send EventResult.
+	// The subsequent process will send its own EventResult when it finishes.
+	if s.expectingContinue.Load() {
+		slog.Info("opencodeSession: readLoop ended after compaction_continue, skipping EventResult", "session_id", s.CurrentSessionID())
+		s.expectingContinue.Store(false)
+		return
 	}
 
 	// Emit EventResult after all steps are done and the process has finished writing.
 	sid := s.CurrentSessionID()
+	slog.Debug("opencodeSession: readLoop complete, sending fallback EventResult", "session_id", sid)
 	evt := core.Event{Type: core.EventResult, SessionID: sid, Done: true}
 	select {
 	case s.events <- evt:
@@ -259,8 +275,25 @@ func (s *opencodeSession) handleText(raw map[string]any) {
 		return
 	}
 	text, _ := part["text"].(string)
+
+	// Extract metadata and synthetic flags to identify compaction_continue
+	metadata, _ := part["metadata"].(map[string]any)
+	synthetic, _ := part["synthetic"].(bool)
+
+	// Check for compaction_continue: this is OpenCode's auto-continuation signal.
+	// When received, we should NOT send EventText to engine, but mark that we expect
+	// a continuation (next step_start will start a new turn without EventResult).
+	if synthetic && metadata != nil {
+		if cc, ok := metadata["compaction_continue"].(bool); ok && cc {
+			slog.Info("opencodeSession: compaction_continue detected, marking expectingContinue", "session_id", s.CurrentSessionID())
+			s.expectingContinue.Store(true)
+			// Do NOT send EventText - this is internal continuation signal
+			return
+		}
+	}
+
 	if text != "" {
-		evt := core.Event{Type: core.EventText, Content: text}
+		evt := core.Event{Type: core.EventText, Content: text, Metadata: metadata, Synthetic: synthetic}
 		select {
 		case s.events <- evt:
 		case <-s.ctx.Done():

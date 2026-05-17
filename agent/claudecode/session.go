@@ -56,7 +56,7 @@ type claudeSession struct {
 	gracefulStopTimeout time.Duration
 }
 
-func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cliArgsFlag string, model, effort, sessionID, mode string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int) (*claudeSession, error) {
+func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cliArgsFlag string, model, effort, sessionID, mode, systemPrompt string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int) (*claudeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	// innerArgs are Claude Code CLI flags — when a wrapper is used with
@@ -89,6 +89,12 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 		innerArgs = append(innerArgs, "--disallowedTools", strings.Join(disallowedTools, ","))
 	}
 
+	// Handle custom system prompt
+	if systemPrompt != "" {
+		innerArgs = append(innerArgs, "--system-prompt", systemPrompt)
+	}
+
+	// Always append cc-connect system prompt for functionality awareness
 	if sysPrompt := core.AgentSystemPrompt(); sysPrompt != "" {
 		if platformPrompt != "" {
 			sysPrompt += "\n## Formatting\n" + platformPrompt + "\n"
@@ -102,7 +108,7 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 	if maxContextTokens > 0 {
 		innerArgs = append(innerArgs, "--max-context-tokens", strconv.Itoa(maxContextTokens))
 	}
-	
+
 	// outerArgs are understood by both the wrapper and Claude CLI directly.
 	var outerArgs []string
 	if model != "" {
@@ -859,7 +865,7 @@ func (cs *claudeSession) Close() error {
 // Uses single quotes because some splitters (e.g. my_cli) don't support
 // backslash escapes inside double quotes. For values containing single
 // quotes, we close the single-quoted segment, add an escaped single
-// quote, and reopen: 'it'\''s' → it's
+// quote, and reopen: 'it'\”s' → it's
 func shellJoinArgs(args []string) string {
 	var b strings.Builder
 	for i, a := range args {

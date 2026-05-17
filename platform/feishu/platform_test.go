@@ -828,6 +828,22 @@ func TestLark_ReconstructReplyCtx(t *testing.T) {
 	}
 }
 
+func TestUserIDFromEventFallsBackToUserID(t *testing.T) {
+	userID := "uid_user123"
+	if got := userIDFromEvent(&larkim.UserId{UserId: &userID}); got != userID {
+		t.Fatalf("userIDFromEvent() = %q, want %q", got, userID)
+	}
+}
+
+func TestResolveUserNameSkipsInvalidLookupID(t *testing.T) {
+	p := &Platform{}
+	for _, id := range []string{"", "feishu:oc_chat:ou_user", "ou user"} {
+		if got := p.resolveUserName(id); got != id {
+			t.Fatalf("resolveUserName(%q) = %q, want unchanged", id, got)
+		}
+	}
+}
+
 func stringPtr(s string) *string { return &s }
 
 func TestSanitizeMarkdownURLs(t *testing.T) {
@@ -925,6 +941,33 @@ func TestBuildPreviewCardJSON_ProgressPayloadUsesStructuredCard(t *testing.T) {
 	header, ok := card["header"].(map[string]any)
 	if !ok || header == nil {
 		t.Fatalf("expected header in card json, got %#v", card["header"])
+	}
+}
+
+func TestBuildRichCard_RendersThinkingAndToolResultRows(t *testing.T) {
+	code := 0
+	success := true
+	cardJSON := buildRichCard(core.CardStatusWorking, "", []core.ToolStep{
+		{Kind: core.ToolStepKindThinking, Name: "Thinking", Summary: "Inspecting event routing"},
+		{
+			Kind:     core.ToolStepKindTool,
+			Name:     "Bash",
+			Summary:  "echo hi",
+			Result:   "hi",
+			Status:   "completed",
+			ExitCode: &code,
+			Success:  &success,
+			Done:     true,
+		},
+	}, "done", true, time.Second)
+
+	for _, want := range []string{"Inspecting event routing", "echo hi", "completed", "exit: 0", "hi"} {
+		if !strings.Contains(cardJSON, want) {
+			t.Fatalf("rich card should contain %q, got %q", want, cardJSON)
+		}
+	}
+	if strings.Contains(cardJSON, core.ProgressCardPayloadPrefix) {
+		t.Fatalf("rich card should not contain progress payload prefix, got %q", cardJSON)
 	}
 }
 
@@ -1026,8 +1069,8 @@ func TestAllowChat_FiltersGroupMessages(t *testing.T) {
 			p, err := newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
 				"app_id": "cli_xxx", "app_secret": "secret",
 				"enable_feishu_card": true,
-				"group_reply_all":   true,
-				"allow_chat":        tt.allowChat,
+				"group_reply_all":    true,
+				"allow_chat":         tt.allowChat,
 			})
 			if err != nil {
 				t.Fatalf("newPlatform() error = %v", err)

@@ -128,33 +128,34 @@ type AudioAttachment struct {
 
 // LocationAttachment represents a geographical location sent by the user.
 type LocationAttachment struct {
-	Latitude            float64 // latitude coordinate
-	Longitude           float64 // longitude coordinate
-	HorizontalAccuracy  float64 // accuracy radius in meters (optional)
-	LivePeriod          int     // time period for live location updates in seconds (optional)
-	Heading             int     // direction of movement in degrees (optional)
-	ProximityAlertRadius int    // maximum distance for proximity alerts in meters (optional)
+	Latitude             float64 // latitude coordinate
+	Longitude            float64 // longitude coordinate
+	HorizontalAccuracy   float64 // accuracy radius in meters (optional)
+	LivePeriod           int     // time period for live location updates in seconds (optional)
+	Heading              int     // direction of movement in degrees (optional)
+	ProximityAlertRadius int     // maximum distance for proximity alerts in meters (optional)
 }
 
 // Message represents a unified incoming message from any platform.
 type Message struct {
-	SessionKey string // unique key for user context, e.g. "feishu:{chatID}:{userID}"
-	Platform   string
-	MessageID  string // platform message ID for tracing
-	UserID     string
-	UserName   string
-	ChatName   string // human-readable chat/group name (optional)
-	Content    string
-	Images     []ImageAttachment // attached images (if any)
-	Files      []FileAttachment  // attached files (if any)
-	Audio        *AudioAttachment // voice message (if any)
+	SessionKey   string // unique key for user context, e.g. "feishu:{chatID}:{userID}"
+	Platform     string
+	MessageID    string // platform message ID for tracing
+	Recalled     bool   // true for platform message recall/delete events targeting MessageID
+	UserID       string
+	UserName     string
+	ChatName     string // human-readable chat/group name (optional)
+	Content      string
+	Images       []ImageAttachment   // attached images (if any)
+	Files        []FileAttachment    // attached files (if any)
+	Audio        *AudioAttachment    // voice message (if any)
 	Location     *LocationAttachment // geographical location (if any)
 	ExtraContent string              // platform-enriched content (e.g. location text, reply quote) prepended for the agent
 	ChannelKey   string              // platform-provided channel identifier for workspace binding (optional)
-	ReplyCtx      any             // platform-specific context needed for replying
-	FromVoice     bool            // true if message originated from voice transcription
-	ModeOverride  string          // if set, temporarily override agent permission mode for this message
-	SkillInvoked  string          // skill name if this message was produced by a skill invocation
+	ReplyCtx     any    // platform-specific context needed for replying
+	FromVoice    bool   // true if message originated from voice transcription
+	ModeOverride string // if set, temporarily override agent permission mode for this message
+	SkillInvoked string // skill name if this message was produced by a skill invocation
 }
 
 // EventType distinguishes different kinds of agent output.
@@ -213,12 +214,14 @@ type Event struct {
 	Questions    []UserQuestion // populated when ToolName == "AskUserQuestion"
 	Done         bool
 	Error        error
-	ErrorKind              ErrorKind // structured classification for EventError (zero value = unknown)
-	InputTokens            int       // non-cached input tokens from agent result events
-	CacheCreationTokens    int       // tokens written to prompt cache
-	CacheReadTokens        int       // tokens read from prompt cache
-	OutputTokens           int       // output tokens (thinking + response text)
-	ContextTokens          int       // last API request's total input tokens (for ctx% estimate)
+	ErrorKind           ErrorKind      // structured classification for EventError (zero value = unknown)
+	InputTokens         int            // non-cached input tokens from agent result events
+	CacheCreationTokens int            // tokens written to prompt cache
+	CacheReadTokens     int            // tokens read from prompt cache
+	OutputTokens        int            // output tokens (thinking + response text)
+	ContextTokens       int            // last API request's total input tokens (for ctx% estimate)
+	Metadata            map[string]any // optional metadata from agent (e.g. compaction_continue)
+	Synthetic           bool           // true if this is a synthetic/generated message (not from real user)
 }
 
 // HistoryEntry is one turn in a conversation.

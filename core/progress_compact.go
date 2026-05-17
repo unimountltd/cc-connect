@@ -259,6 +259,10 @@ type compactProgressWriter struct {
 	tickerStop     chan struct{}
 	usageSuffix    string    // usage indicator to include in final progress card
 	cooldownUntil  time.Time // skip UpdateMessage calls until this moment (set on transient errors)
+
+	// Throttle message edits to avoid platform rate limits (e.g. Discord ~5 edits/5s).
+	minUpdateInterval time.Duration
+	lastUpdateAt      time.Time
 }
 
 // isTransientUpdateErr reports whether an UpdateMessage error is expected to
@@ -389,6 +393,9 @@ func newCompactProgressWriter(ctx context.Context, p Platform, replyCtx any, age
 		workDir:      workDir,
 		injectHeader: injectHeader,
 		maxEntries:   10,
+	}
+	if throttler, ok := p.(ProgressUpdateThrottler); ok {
+		w.minUpdateInterval = throttler.ProgressUpdateInterval()
 	}
 	if w.style != progressStyleCompact && w.style != progressStyleCard {
 		slog.Debug("progress writer disabled: unsupported style", "platform", p.Name(), "style", w.style)
@@ -581,6 +588,7 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 			}
 			w.handle = handle
 			w.lastSent = w.content
+			w.lastUpdateAt = time.Now()
 			return true
 		}
 		callCtx, cancel := w.withAPITimeout()
@@ -593,6 +601,11 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 		}
 		w.handle = w.replyCtx
 		w.lastSent = w.content
+		w.lastUpdateAt = time.Now()
+		return true
+	}
+
+	if w.minUpdateInterval > 0 && time.Since(w.lastUpdateAt) < w.minUpdateInterval {
 		return true
 	}
 
@@ -618,6 +631,7 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 	}
 	w.cooldownUntil = time.Time{}
 	w.lastSent = w.content
+	w.lastUpdateAt = time.Now()
 	return true
 }
 
