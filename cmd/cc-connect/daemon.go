@@ -103,6 +103,7 @@ func daemonInstall(args []string) {
 	fmt.Println("  cc-connect daemon restart   - Restart")
 	fmt.Println("  cc-connect daemon stop      - Stop")
 	fmt.Println("  cc-connect daemon uninstall - Remove")
+
 }
 
 func parseDaemonInstallArgs(args []string) (daemon.Config, bool, error) {

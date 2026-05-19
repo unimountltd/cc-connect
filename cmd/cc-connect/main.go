@@ -253,15 +253,10 @@ func main() {
 		}
 
 		engine := core.NewEngine(proj.Name, agent, platforms, sessionFile, lang)
-		showCtx := true
-		if proj.ShowContextIndicator != nil {
-			showCtx = *proj.ShowContextIndicator
-		}
+		// Wire display settings including show_context_indicator and reply_footer
+		// Global [display] config can be overridden by project-level settings
+		_, _, _, _, _, showCtx, showFooter := config.EffectiveDisplay(cfg, &proj)
 		engine.SetShowContextIndicator(showCtx)
-		showFooter := true
-		if proj.ReplyFooter != nil {
-			showFooter = *proj.ReplyFooter
-		}
 		engine.SetReplyFooterEnabled(showFooter)
 		engine.SetAttachmentSendEnabled(cfg.AttachmentSend != "off")
 		engine.SetFilterExternalSessions(proj.FilterExternalSessions != nil && *proj.FilterExternalSessions)
@@ -364,7 +359,7 @@ func main() {
 
 		// Wire display truncation settings (includes legacy quiet → display mapping)
 		{
-			_, tm, tool, tmlen, toollen := config.EffectiveDisplay(cfg, &proj)
+			_, tm, tool, tmlen, toollen, _, _ := config.EffectiveDisplay(cfg, &proj)
 			engine.SetDisplayConfig(core.DisplayCfg{
 				ThinkingMessages: tm,
 				ThinkingMaxLen:   tmlen,
@@ -592,6 +587,16 @@ func main() {
 					ttsCfg.Provider = "minimax"
 				} else {
 					slog.Warn("tts: minimax provider enabled but api_key is empty")
+				}
+			case "mimo":
+				apiKey := cfg.TTS.Mimo.APIKey
+				baseURL := cfg.TTS.Mimo.BaseURL
+				model := cfg.TTS.Mimo.Model
+				if apiKey != "" {
+					ttsCfg.TTS = core.NewMimoTTS(apiKey, baseURL, model, nil)
+					ttsCfg.Provider = "mimo"
+				} else {
+					slog.Warn("tts: mimo provider enabled but api_key is empty")
 				}
 			case "espeak":
 				voice := cfg.TTS.Voice
@@ -1407,7 +1412,7 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	}
 
 	// Reload display config (includes legacy quiet → display mapping)
-	_, tm, tool, tmlen, toollen := config.EffectiveDisplay(cfg, proj)
+	_, tm, tool, tmlen, toollen, showCtx, showFooter := config.EffectiveDisplay(cfg, proj)
 	engine.SetDisplayConfig(core.DisplayCfg{
 		ThinkingMessages: tm,
 		ThinkingMaxLen:   tmlen,
@@ -1415,6 +1420,10 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		ToolMessages:     tool,
 	})
 	result.DisplayUpdated = true
+
+	// Wire show_context_indicator and reply_footer from display config
+	engine.SetShowContextIndicator(showCtx)
+	engine.SetReplyFooterEnabled(showFooter)
 
 	// Reload auto-compress settings
 	if proj.AutoCompress.Enabled != nil && *proj.AutoCompress.Enabled {
@@ -1436,16 +1445,6 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		engine.SetResetOnIdle(0)
 	}
 
-	showCtx := true
-	if proj.ShowContextIndicator != nil {
-		showCtx = *proj.ShowContextIndicator
-	}
-	engine.SetShowContextIndicator(showCtx)
-	showFooter := true
-	if proj.ReplyFooter != nil {
-		showFooter = *proj.ReplyFooter
-	}
-	engine.SetReplyFooterEnabled(showFooter)
 
 	// Reload sender injection
 	engine.SetInjectSender(proj.InjectSender != nil && *proj.InjectSender)
