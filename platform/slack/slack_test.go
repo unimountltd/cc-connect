@@ -9,6 +9,42 @@ import (
 	"github.com/slack-go/slack/slackevents"
 )
 
+func TestAssistantOrThreadTS(t *testing.T) {
+	cases := []struct {
+		name string
+		ev   slackevents.MessageEvent
+		want string
+	}{
+		{
+			name: "fresh channel message → channel root",
+			ev:   slackevents.MessageEvent{ChannelType: "channel", TimeStamp: "1700000000.000001"},
+			want: "",
+		},
+		{
+			name: "DM → channel root",
+			ev:   slackevents.MessageEvent{ChannelType: "im", TimeStamp: "1700000000.000002"},
+			want: "",
+		},
+		{
+			name: "user replied inside a thread → continue thread",
+			ev:   slackevents.MessageEvent{ChannelType: "channel", TimeStamp: "1700000000.000004", ThreadTimeStamp: "1700000000.000003"},
+			want: "1700000000.000003",
+		},
+		{
+			name: "Assistant Chat tab thread → continue thread",
+			ev:   slackevents.MessageEvent{ChannelType: "im", TimeStamp: "1700000000.000006", ThreadTimeStamp: "1700000000.000005"},
+			want: "1700000000.000005",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := assistantOrThreadTS(&tc.ev); got != tc.want {
+				t.Fatalf("assistantOrThreadTS = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestStripAppMentionText(t *testing.T) {
 	tests := []struct {
 		name string

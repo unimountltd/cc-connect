@@ -151,6 +151,10 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 				if content == "" && len(images) == 0 && audio == nil && len(docFiles) == 0 {
 					return
 				}
+				// Reply anchor: continue an existing thread when the mention
+				// is inside one; otherwise post at channel root (matches the
+				// MessageEvent rule in assistantOrThreadTS).
+				replyTS := ev.ThreadTimeStamp
 				msg := &core.Message{
 					SessionKey: sessionKey, Platform: "slack",
 					UserID: ev.User, UserName: p.resolveUserName(ev.User),
@@ -160,7 +164,7 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					Files:     docFiles,
 					Audio:     audio,
 					MessageID: ev.TimeStamp,
-					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: ev.TimeStamp},
+					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: replyTS},
 				}
 				p.handler(p, msg)
 
@@ -378,22 +382,18 @@ func slackFileDisplayName(f slackevents.File) string {
 // — without it, the reply goes to the DM root and surfaces in the History
 // tab feed instead, breaking the conversational UX.
 //
-// For regular channel messages (not DM, not already in a thread): use the
-// message's own TimeStamp so replies are threaded under the user's message,
-// preserving the old behavior of keeping conversations in threads.
+// For fresh channel messages (not already in a thread): return empty so
+// replies post at channel root rather than opening a new thread under the
+// user's message. Users who want threaded conversations can start a thread
+// explicitly; the bot will continue it.
 //
-// For DM messages (channel_type=im) that are not in an Assistant thread:
-// return empty so replies go top-level (natural 1-on-1 conversation).
+// For DM messages: also empty (natural 1-on-1 conversation).
 func assistantOrThreadTS(ev *slackevents.MessageEvent) string {
 	if ev.ThreadTimeStamp != "" {
 		// Already in a thread (Assistant Chat tab or regular thread reply).
 		return ev.ThreadTimeStamp
 	}
-	// For non-DM channels, thread under the user's message.
-	if ev.ChannelType != "im" {
-		return ev.TimeStamp
-	}
-	// DM top-level: top-level reply is natural.
+	// Fresh channel message or DM: reply at root.
 	return ""
 }
 
