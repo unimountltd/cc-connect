@@ -4327,13 +4327,19 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 		name = strings.Join(args, " ")
 	}
 	sessions.NewSession(msg.SessionKey, name)
+	textReply := func() string {
+		if name != "" {
+			return e.i18n.Tf(MsgNewSessionCreatedName, name)
+		}
+		return e.i18n.T(MsgNewSessionCreated)
+	}
 	if er, ok := p.(EmojiReactor); ok {
 		if err := er.AddReaction(e.ctx, msg.ReplyCtx, "white_check_mark"); err != nil {
 			slog.Debug("react failed, falling back to text reply", "error", err)
-			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNewSessionCreated))
+			e.reply(p, msg.ReplyCtx, textReply())
 		}
 	} else {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNewSessionCreated))
+		e.reply(p, msg.ReplyCtx, textReply())
 	}
 }
 
