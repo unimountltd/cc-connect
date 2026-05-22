@@ -27,7 +27,8 @@ func init() {
 
 type replyContext struct {
 	channel   string
-	timestamp string // thread_ts for threading replies
+	timestamp string // thread_ts for threading replies (empty = post at channel root)
+	messageTS string // ts of the user's triggering message; used as reaction target
 }
 
 type Platform struct {
@@ -164,7 +165,7 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					Files:     docFiles,
 					Audio:     audio,
 					MessageID: ev.TimeStamp,
-					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: replyTS},
+					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: replyTS, messageTS: ev.TimeStamp},
 				}
 				p.handler(p, msg)
 
@@ -225,7 +226,7 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					ChatName: p.resolveChannelNameForMsg(ev.Channel),
 					Content:  ev.Text, Images: images, Files: docFiles, Audio: audio,
 					MessageID: ts,
-					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: assistantOrThreadTS(ev)},
+					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: assistantOrThreadTS(ev), messageTS: ts},
 				}
 				p.handler(p, msg)
 			}
@@ -727,11 +728,11 @@ func (p *Platform) FormattingInstructions() string {
 // All reactions are removed when the returned stop function is called.
 func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 	rc, ok := rctx.(replyContext)
-	if !ok || rc.channel == "" || rc.timestamp == "" {
+	if !ok || rc.channel == "" || rc.messageTS == "" {
 		return func() {}
 	}
 
-	ref := slack.ItemRef{Channel: rc.channel, Timestamp: rc.timestamp}
+	ref := slack.ItemRef{Channel: rc.channel, Timestamp: rc.messageTS}
 	var mu sync.Mutex
 	var added []string
 
@@ -805,10 +806,10 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 // AddReaction adds an emoji reaction to the user's message.
 func (p *Platform) AddReaction(_ context.Context, rctx any, emoji string) error {
 	rc, ok := rctx.(replyContext)
-	if !ok || rc.channel == "" || rc.timestamp == "" {
+	if !ok || rc.channel == "" || rc.messageTS == "" {
 		return fmt.Errorf("slack: invalid reply context for reaction")
 	}
-	ref := slack.ItemRef{Channel: rc.channel, Timestamp: rc.timestamp}
+	ref := slack.ItemRef{Channel: rc.channel, Timestamp: rc.messageTS}
 	return p.client.AddReaction(emoji, ref)
 }
 
@@ -816,10 +817,10 @@ func (p *Platform) AddReaction(_ context.Context, rctx any, emoji string) error 
 // a turn: checkered_flag for success, woman-raising-hand for problems.
 func (p *Platform) ReactCompletion(_ context.Context, rctx any, success bool) {
 	rc, ok := rctx.(replyContext)
-	if !ok || rc.channel == "" || rc.timestamp == "" {
+	if !ok || rc.channel == "" || rc.messageTS == "" {
 		return
 	}
-	ref := slack.ItemRef{Channel: rc.channel, Timestamp: rc.timestamp}
+	ref := slack.ItemRef{Channel: rc.channel, Timestamp: rc.messageTS}
 	emoji := "checkered_flag"
 	if !success {
 		emoji = "woman-raising-hand::skin-tone-2"
