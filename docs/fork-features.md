@@ -30,6 +30,23 @@ Listed roughly newest-first within each section. Commit hashes link to fork hist
   is honoured. Elapsed-time ticker bumped 5 s → 10 s to halve `chat.update` volume on
   long tool runs.
 
+- **Unconditional launchd KeepAlive** (`cd45e2c3`)
+  launchd `KeepAlive` is unconditional (boolean `true`) rather than gated on
+  `SuccessfulExit`. SIGKILL / OOM-kill / clean exits all trigger an immediate restart.
+  Diverges from upstream's `SuccessfulExit=false` choice; we keep restart-on-everything
+  since cc-connect is the daemon, not a finite job.
+
+## Wakeup routing
+
+- **SDK self-fired wakeup forwarding (UNI-12 v2)** (`e3722cbd`, `81f89798`, `474b1ed9`)
+  Claude Code's in-process `ScheduleWakeup` fires events while no user turn is in
+  flight. The engine detects these via a per-session in-turn channel-lock, treats
+  them as orphan turns, renders each one to the messaging platform with a
+  "Scheduled wakeup" header, and answers any permission prompts inline (auto-allow
+  in `bypassPermissions`, deny otherwise). Replaces a v1 parallel-scheduler approach
+  that double-fired. Follow-ups harden the channel-lock state machine, fix
+  multi-workspace lookup, and bypass the lock for startup `system` events.
+
 ## Slack experience
 
 - **Compact progress card** (`90552a4e`)
@@ -62,6 +79,13 @@ Listed roughly newest-first within each section. Commit hashes link to fork hist
 - **Elapsed-time ticker + deferred stop hint** (`54f6601a`, `924eb1a1`)
   Live elapsed-time on the compact progress card. Stop hint deferred for thinking
   events to reduce noise.
+
+- **Per-model context-window % calculation** (`52d15aeb`)
+  The `ctx ~%` indicator and telemetry `ContextPct` previously divided by a hardcoded
+  200k. `contextWindowForModel()` now recognises Anthropic `[1m]` variants (1M),
+  Gemini 1.5/2.5 (1M), GPT-5 / 4.1 (400k), defaulting to 200k. Plumbed through
+  `usageIndicator`, compact progress `SetUsage`, and the telemetry collector. Active
+  model resolves from session first, then agent.
 
 ## Session control
 
@@ -144,3 +168,27 @@ Listed roughly newest-first within each section. Commit hashes link to fork hist
 - **`SECURITY_REVIEW.md`** (`ab86d37b`)
   Comprehensive security review at the repo root, generated during the initial fork
   hardening pass.
+
+## Upstream-merge maintenance
+
+Not user-facing features, but deliberate fork tooling choices worth recording so
+future upstream merges don't undo them.
+
+- **Wholesale-take strategy for `engine_test.go`** (`2218e536`)
+  On each upstream merge, `core/engine_test.go` is replaced verbatim with upstream's,
+  then call sites for `processInteractiveEvents` are patched to pass the fork's
+  trailing `telemetryMsgCtx{}` arg. Fork-only tests live in `core/engine_fork_test.go`
+  so the wholesale-take stays clean.
+
+- **Async-aware fork tests + targeted skip-list** (`c3ddf8d6`)
+  `waitForInteractiveCleanup` helper handles upstream's now-async `/model` switch;
+  the stub agent gets a mutex and `SentPrompts()` accessor for race-free assertions;
+  one upstream compact-progress test is skipped as fork-divergent by design.
+
+- **Lint cleanup of inherited upstream code** (`134644b7`)
+  Silences errcheck on best-effort calls and removes dead helpers so CI passes.
+  Mentioned here so it isn't re-added during a future merge.
+
+- **`EffectiveDisplay` / `SaveDisplayConfig` signature adapters** (`4f8d68bd`)
+  Stop-gap: pass `nil` / discard the new `mode` return value until the fork adopts
+  upstream's full display-mode enum.
