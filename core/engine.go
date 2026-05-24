@@ -1672,6 +1672,9 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		case isInjectPrefix(content):
 			content = "/inject " + extractInjectText(content)
 			msg.Content = content
+		case isPsPrefix(content):
+			content = "/ps " + extractPsText(content)
+			msg.Content = content
 		}
 	}
 
@@ -3848,6 +3851,20 @@ func extractInjectText(content string) string {
 	trimmed := strings.TrimSpace(content)
 	// Skip past "inject:" (case-insensitive)
 	return strings.TrimSpace(trimmed[len("inject:"):])
+}
+
+// isPsPrefix returns true if content starts with "ps:" (case-insensitive).
+// Lets users on platforms that intercept "/" (e.g. Slack) trigger /ps without
+// registering a workspace slash command.
+func isPsPrefix(content string) bool {
+	lower := strings.ToLower(strings.TrimSpace(content))
+	return strings.HasPrefix(lower, "ps:")
+}
+
+// extractPsText extracts the text after the "ps:" prefix.
+func extractPsText(content string) string {
+	trimmed := strings.TrimSpace(content)
+	return strings.TrimSpace(trimmed[len("ps:"):])
 }
 
 // matchPrefix finds a unique command matching the given prefix.

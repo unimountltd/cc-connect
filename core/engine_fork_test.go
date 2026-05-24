@@ -320,6 +320,65 @@ func TestBareNewSession_ShortCircuitsToNewCommand(t *testing.T) {
 	// Should go to agent, not create a session
 }
 
+// TestPsPrefix_ShortCircuitsToPsCommand verifies that bare "ps: ..." input
+// gets rewritten to "/ps ..." so users on platforms that intercept the "/"
+// (e.g. Slack) can deliver a P.S. without registering a workspace slash
+// command. Mirrors the inject: shortcut pattern.
+func TestPsPrefix_ShortCircuitsToPsCommand(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	key := "test:user1"
+	e.sessions.GetOrCreateActive(key)
+
+	for _, input := range []string{"ps: keep going", "PS: keep going", "Ps:  keep going"} {
+		// Install an alive interactive session so cmdPs has something to
+		// deliver into. Re-add each iteration since cmdPs leaves state
+		// alone but tests need a fresh send count.
+		e.interactiveMu.Lock()
+		e.interactiveStates[key] = &interactiveState{
+			agentSession: newControllableSession("s-ps"),
+			platform:     p,
+			replyCtx:     "ctx",
+		}
+		e.interactiveMu.Unlock()
+
+		msg := &Message{
+			SessionKey: key,
+			Platform:   "test",
+			Content:    input,
+			ReplyCtx:   "ctx",
+		}
+		e.handleMessage(p, msg)
+
+		sent := p.getSent()
+		found := false
+		for _, s := range sent {
+			if strings.Contains(s, "P.S.") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("input %q: expected P.S. delivered reply, got %v", input, sent)
+		}
+		p.clearSent()
+	}
+
+	// "ps means postscript" should NOT trigger — only "ps:" with a colon does.
+	msg := &Message{
+		SessionKey: key,
+		Platform:   "test",
+		Content:    "ps means postscript",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+	for _, s := range p.getSent() {
+		if strings.Contains(s, "P.S. delivered") {
+			t.Fatalf("non-prefix message should not trigger /ps, got %v", p.getSent())
+		}
+	}
+}
+
 func TestCompactProgress_ToolUseDefersStopHint(t *testing.T) {
 	p := &stubCompactProgressPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
 	w := newCompactProgressWriter(context.Background(), p, "ctx", "claudecode", LangEnglish, nil, "", "")
