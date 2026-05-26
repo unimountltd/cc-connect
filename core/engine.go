@@ -7710,6 +7710,12 @@ func (e *Engine) ExecuteSessionCmdAndSend(sessionKey, command, prompt string) er
 	}
 	e.handleCommand(p, cmdMsg, command)
 
+	// Echo the kickoff prompt to the platform so the human watching the
+	// chat can see what the programmatic handoff actually sent. Without
+	// this, only the agent's eventual response surfaces — the trigger
+	// itself is invisible.
+	e.reply(p, replyCtx, e.i18n.Tf(MsgInitialMessage, prompt))
+
 	kickoff := &Message{
 		SessionKey: sessionKey,
 		Platform:   p.Name(),

@@ -111,6 +111,44 @@ func (p *reconstructingPlatform) ReconstructReplyCtx(sessionKey string) (any, er
 	return "reconstructed:" + sessionKey, nil
 }
 
+// TestExecuteSessionCmdAndSend_EchoesKickoffPromptToPlatform verifies that the
+// CLI/API "/new + kickoff prompt" path echoes the prompt to the platform so
+// the human watching the chat can see what was sent. Without the echo, only
+// the agent's response surfaces and the trigger looks like it came from
+// nowhere — a batch handoff in particular ("cc-connect send --session-cmd
+// /new --message ...") is invisible otherwise.
+func TestExecuteSessionCmdAndSend_EchoesKickoffPromptToPlatform(t *testing.T) {
+	p := &reconstructingPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	agentSession := newResultAgentSession("done")
+	agent := &resultAgent{session: agentSession}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	const prompt = "Work on issue #42"
+	if err := e.ExecuteSessionCmdAndSend("test:u1", "/new", prompt); err != nil {
+		t.Fatalf("ExecuteSessionCmdAndSend: %v", err)
+	}
+
+	deadline := time.After(2 * time.Second)
+	for {
+		echoed := false
+		for _, s := range p.getSent() {
+			if strings.Contains(s, prompt) && strings.Contains(s, "📨") {
+				echoed = true
+				break
+			}
+		}
+		if echoed {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for kickoff echo containing %q; got %v", prompt, p.getSent())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
 func TestCmdNext_WithoutPromptShowsUsage(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)

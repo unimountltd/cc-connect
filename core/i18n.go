@@ -452,6 +452,7 @@ const (
 
 	MsgNewSessionCreated      MsgKey = "new_session_created"
 	MsgNewSessionCreatedName  MsgKey = "new_session_created_name"
+	MsgInitialMessage         MsgKey = "initial_message"
 	MsgNextUsage              MsgKey = "next_usage"
 	MsgSessionAutoResetIdle   MsgKey = "session_auto_reset_idle"
 	MsgSessionClosingGraceful MsgKey = "session_closing_graceful"
@@ -2940,6 +2941,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "✅ 新會話已建立：%s",
 		LangJapanese:           "✅ 新しいセッションを作成しました：%s",
 		LangSpanish:            "✅ Nueva sesión creada: %s",
+	},
+	MsgInitialMessage: {
+		LangEnglish:            "📨 Initial message:\n%s",
+		LangChinese:            "📨 初始消息：\n%s",
+		LangTraditionalChinese: "📨 初始訊息：\n%s",
+		LangJapanese:           "📨 初期メッセージ：\n%s",
+		LangSpanish:            "📨 Mensaje inicial:\n%s",
 	},
 	MsgNextUsage: {
 		LangEnglish:            "Usage: `/next <prompt>` — start a fresh session and send the prompt as its first turn.",
