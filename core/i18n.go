@@ -303,6 +303,10 @@ const (
 	MsgReasoningCurrent      MsgKey = "reasoning_current"
 	MsgReasoningChanged      MsgKey = "reasoning_changed"
 	MsgReasoningNotSupported MsgKey = "reasoning_not_supported"
+	MsgPresetChanged         MsgKey = "preset_changed"
+	MsgPresetNotSupported    MsgKey = "preset_not_supported"
+	MsgPresetListTitle       MsgKey = "preset_list_title"
+	MsgPresetUsage           MsgKey = "preset_usage"
 
 	MsgCompressNotSupported MsgKey = "compress_not_supported"
 	MsgCompressing          MsgKey = "compressing"
@@ -980,6 +984,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/allow <tool>\n  Pre-allow a tool (next session)\n\n" +
 			"/model [switch <name>]\n  View/switch model\n\n" +
 			"/reasoning [level]\n  View/switch reasoning effort\n\n" +
+			"/preset [name]\n  Switch model + thinking effort bundle\n\n" +
 			"/mode [name]\n  View/switch permission mode\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  View/switch language\n\n" +
 			"/compress\n  Compress conversation context\n\n" +
@@ -1023,6 +1028,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/allow <工具名>\n  预授权工具（下次会话生效）\n\n" +
 			"/model [switch <名称>]\n  查看/切换模型\n\n" +
 			"/reasoning [级别]\n  查看/切换推理强度\n\n" +
+			"/preset [名称]\n  切换模型 + 思考强度组合\n\n" +
 			"/mode [名称]\n  查看/切换权限模式\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  查看/切换语言\n\n" +
 			"/compress\n  压缩会话上下文\n\n" +
@@ -1066,6 +1072,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/allow <工具名>\n  預授權工具（下次會話生效）\n\n" +
 			"/model [switch <名稱>]\n  查看/切換模型\n\n" +
 			"/reasoning [級別]\n  查看/切換推理強度\n\n" +
+			"/preset [名稱]\n  切換模型 + 思考強度組合\n\n" +
 			"/mode [名稱]\n  查看/切換權限模式\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  查看/切換語言\n\n" +
 			"/compress\n  壓縮會話上下文\n\n" +
@@ -1107,6 +1114,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/allow <ツール名>\n  ツールを事前許可（次のセッションで有効）\n\n" +
 			"/model [switch <名前>]\n  モデルの表示/切り替え\n\n" +
 			"/reasoning [レベル]\n  推論レベルの表示/切り替え\n\n" +
+			"/preset [名前]\n  モデル + 思考強度のセットを切り替え\n\n" +
 			"/mode [名前]\n  権限モードの表示/切り替え\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  言語の表示/切り替え\n\n" +
 			"/compress\n  会話コンテキストを圧縮\n\n" +
@@ -1148,6 +1156,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/allow <herramienta>\n  Pre-autorizar herramienta (próxima sesión)\n\n" +
 			"/model [switch <nombre>]\n  Ver/cambiar modelo\n\n" +
 			"/reasoning [nivel]\n  Ver/cambiar nivel de razonamiento\n\n" +
+			"/preset [nombre]\n  Cambiar paquete de modelo + esfuerzo de pensamiento\n\n" +
 			"/mode [nombre]\n  Ver/cambiar modo de permisos\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  Ver/cambiar idioma\n\n" +
 			"/compress\n  Comprimir contexto de conversación\n\n" +
@@ -2063,6 +2072,34 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "當前 Agent 不支援推理強度切換。",
 		LangJapanese:           "このエージェントは推論強度の切り替えをサポートしていません。",
 		LangSpanish:            "Este agente no soporta el cambio de esfuerzo de razonamiento.",
+	},
+	MsgPresetChanged: {
+		LangEnglish:            "Preset switched to `%s` (model `%s` + `%s` thinking). New sessions will use this setting.",
+		LangChinese:            "已切换到预设 `%s`（模型 `%s` + `%s` 思考强度），新会话将使用此设置。",
+		LangTraditionalChinese: "已切換到預設 `%s`（模型 `%s` + `%s` 思考強度），新會話將使用此設定。",
+		LangJapanese:           "プリセットを `%s`（モデル `%s` + `%s` 思考）に切り替えました。新しいセッションで使用されます。",
+		LangSpanish:            "Preset cambiado a `%s` (modelo `%s` + pensamiento `%s`). Las nuevas sesiones usarán esta configuración.",
+	},
+	MsgPresetNotSupported: {
+		LangEnglish:            "This agent does not support presets.",
+		LangChinese:            "当前 Agent 不支持预设。",
+		LangTraditionalChinese: "當前 Agent 不支援預設。",
+		LangJapanese:           "このエージェントはプリセットをサポートしていません。",
+		LangSpanish:            "Este agente no soporta presets.",
+	},
+	MsgPresetListTitle: {
+		LangEnglish:            "Available presets:",
+		LangChinese:            "可用预设：",
+		LangTraditionalChinese: "可用預設：",
+		LangJapanese:           "利用可能なプリセット:",
+		LangSpanish:            "Presets disponibles:",
+	},
+	MsgPresetUsage: {
+		LangEnglish:            "Tap a button, or just type the preset name (e.g. `fable`). You can also send `preset` to see this list.",
+		LangChinese:            "点击按钮，或直接输入预设名称（例如 `fable`）。也可发送 `preset` 查看此列表。",
+		LangTraditionalChinese: "點擊按鈕，或直接輸入預設名稱（例如 `fable`）。也可發送 `preset` 查看此列表。",
+		LangJapanese:           "ボタンをタップするか、プリセット名を直接入力してください（例: `fable`）。`preset` と送ると一覧を表示します。",
+		LangSpanish:            "Toca un botón o escribe el nombre del preset (p. ej. `fable`). También puedes enviar `preset` para ver esta lista.",
 	},
 	MsgMemoryNotSupported: {
 		LangEnglish:            "This agent does not support memory files.",

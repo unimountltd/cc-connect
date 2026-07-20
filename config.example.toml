@@ -770,6 +770,16 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # 可选：设置推理强度等级（传递给 claude --effort）
 # reasoning_effort = "high"  # "low" | "medium" | "high" | "max"
 
+# Optional: named presets that bundle a model + thinking effort, switchable at
+# runtime with /preset <name> (or tap a button). When omitted, two built-in
+# presets are offered: "fable" (fable + high) and "opus" (opus 4.8 + high).
+# 可选：将「模型 + 思考强度」打包成命名预设，运行时用 /preset <名称> 切换。
+# 未配置时默认提供 "fable"（fable + high）和 "opus"（opus 4.8 + high）两个预设。
+# presets = [
+#   { name = "fable", model = "fable", effort = "high", desc = "Fable 5 + high thinking" },
+#   { name = "opus",  model = "opus",  effort = "high", desc = "Opus 4.8 + high thinking" },
+# ]
+
 # In default/acceptEdits mode, you can pre-approve specific tools:
 # 在 default/acceptEdits 模式下，可预授权特定工具：
 # allowed_tools = ["Read", "Grep", "Glob", "Bash", "Edit", "Write"]

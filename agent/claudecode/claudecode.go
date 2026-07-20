@@ -40,8 +40,9 @@ type Agent struct {
 	configEnv        []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
 	cliArgsFlag      string   // if set, claude args are passed as a single string via this flag (e.g. "-a")
 	model            string
-	reasoningEffort  string // "low" | "medium" | "high" | "max"
-	mode             string // "default" | "acceptEdits" | "plan" | "auto" | "bypassPermissions" | "dontAsk"
+	reasoningEffort  string            // "low" | "medium" | "high" | "max"
+	presets          []core.ModePreset // named model+effort bundles for /preset
+	mode             string            // "default" | "acceptEdits" | "plan" | "auto" | "bypassPermissions" | "dontAsk"
 	allowedTools     []string
 	disallowedTools  []string
 	maxContextTokens int // optional: passed as --max-context-tokens when > 0
@@ -64,41 +65,41 @@ type Agent struct {
 }
 
 var claudeProviderManagedEnvVars = map[string]struct{}{
-	"CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST":                  {},
-	"CLAUDE_CODE_USE_BEDROCK":                               {},
-	"CLAUDE_CODE_USE_VERTEX":                                {},
-	"CLAUDE_CODE_USE_FOUNDRY":                               {},
-	"ANTHROPIC_BASE_URL":                                    {},
-	"ANTHROPIC_BEDROCK_BASE_URL":                            {},
-	"ANTHROPIC_VERTEX_BASE_URL":                             {},
-	"ANTHROPIC_FOUNDRY_BASE_URL":                            {},
-	"ANTHROPIC_FOUNDRY_RESOURCE":                            {},
-	"ANTHROPIC_VERTEX_PROJECT_ID":                           {},
-	"CLOUD_ML_REGION":                                       {},
-	"ANTHROPIC_API_KEY":                                     {},
-	"ANTHROPIC_AUTH_TOKEN":                                  {},
-	"CLAUDE_CODE_OAUTH_TOKEN":                               {},
-	"AWS_BEARER_TOKEN_BEDROCK":                              {},
-	"ANTHROPIC_FOUNDRY_API_KEY":                             {},
-	"CLAUDE_CODE_SKIP_BEDROCK_AUTH":                         {},
-	"CLAUDE_CODE_SKIP_VERTEX_AUTH":                          {},
-	"CLAUDE_CODE_SKIP_FOUNDRY_AUTH":                         {},
-	"ANTHROPIC_MODEL":                                       {},
-	"ANTHROPIC_DEFAULT_HAIKU_MODEL":                         {},
-	"ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION":             {},
-	"ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME":                    {},
-	"ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES":  {},
-	"ANTHROPIC_DEFAULT_OPUS_MODEL":                          {},
-	"ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION":              {},
-	"ANTHROPIC_DEFAULT_OPUS_MODEL_NAME":                     {},
-	"ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES":   {},
+	"CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST":                 {},
+	"CLAUDE_CODE_USE_BEDROCK":                              {},
+	"CLAUDE_CODE_USE_VERTEX":                               {},
+	"CLAUDE_CODE_USE_FOUNDRY":                              {},
+	"ANTHROPIC_BASE_URL":                                   {},
+	"ANTHROPIC_BEDROCK_BASE_URL":                           {},
+	"ANTHROPIC_VERTEX_BASE_URL":                            {},
+	"ANTHROPIC_FOUNDRY_BASE_URL":                           {},
+	"ANTHROPIC_FOUNDRY_RESOURCE":                           {},
+	"ANTHROPIC_VERTEX_PROJECT_ID":                          {},
+	"CLOUD_ML_REGION":                                      {},
+	"ANTHROPIC_API_KEY":                                    {},
+	"ANTHROPIC_AUTH_TOKEN":                                 {},
+	"CLAUDE_CODE_OAUTH_TOKEN":                              {},
+	"AWS_BEARER_TOKEN_BEDROCK":                             {},
+	"ANTHROPIC_FOUNDRY_API_KEY":                            {},
+	"CLAUDE_CODE_SKIP_BEDROCK_AUTH":                        {},
+	"CLAUDE_CODE_SKIP_VERTEX_AUTH":                         {},
+	"CLAUDE_CODE_SKIP_FOUNDRY_AUTH":                        {},
+	"ANTHROPIC_MODEL":                                      {},
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL":                        {},
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION":            {},
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME":                   {},
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES": {},
+	"ANTHROPIC_DEFAULT_OPUS_MODEL":                         {},
+	"ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION":             {},
+	"ANTHROPIC_DEFAULT_OPUS_MODEL_NAME":                    {},
+	"ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES":  {},
 
 	// Provider-specific base URL env vars for thinking rewrite proxy routing.
 	// These are set by cc-connect when thinking override is needed for
 	// Bedrock/Vertex/Foundry providers that don't use base_url config.
-	"ANTHROPIC_BEDROCK_PROXY_BASE_URL": {},
-	"ANTHROPIC_VERTEX_PROXY_BASE_URL":  {},
-	"ANTHROPIC_FOUNDRY_PROXY_BASE_URL": {},
+	"ANTHROPIC_BEDROCK_PROXY_BASE_URL":                      {},
+	"ANTHROPIC_VERTEX_PROXY_BASE_URL":                       {},
+	"ANTHROPIC_FOUNDRY_PROXY_BASE_URL":                      {},
 	"ANTHROPIC_DEFAULT_SONNET_MODEL":                        {},
 	"ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION":            {},
 	"ANTHROPIC_DEFAULT_SONNET_MODEL_NAME":                   {},
@@ -131,6 +132,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	cliArgsFlag, _ := opts["cli_args_flag"].(string)
 	model, _ := opts["model"].(string)
 	reasoningEffort, _ := opts["reasoning_effort"].(string)
+	presets := parsePresets(opts["presets"])
 	mode, _ := opts["mode"].(string)
 	mode = normalizePermissionMode(mode)
 	systemPrompt, _ := opts["system_prompt"].(string)
@@ -218,6 +220,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		cliArgsFlag:      cliArgsFlag,
 		model:            model,
 		reasoningEffort:  normalizeEffort(reasoningEffort),
+		presets:          presets,
 		mode:             mode,
 		systemPrompt:     systemPrompt,
 		allowedTools:     allowedTools,
@@ -313,6 +316,78 @@ func (a *Agent) GetReasoningEffort() string {
 
 func (a *Agent) AvailableReasoningEfforts() []string {
 	return []string{"low", "medium", "high", "max"}
+}
+
+// defaultPresets are the built-in model+effort bundles offered when no presets
+// are configured via [agent.options].presets.
+var defaultPresets = []core.ModePreset{
+	{Name: "fable", Model: "fable", Effort: "high", Desc: "Fable 5 + high thinking"},
+	{Name: "opus", Model: "opus", Effort: "high", Desc: "Opus 4.8 + high thinking"},
+}
+
+// AvailablePresets returns the configured presets, or the built-in defaults
+// when none are configured. Efforts are normalized to CLI values.
+func (a *Agent) AvailablePresets() []core.ModePreset {
+	a.mu.RLock()
+	presets := a.presets
+	a.mu.RUnlock()
+	if len(presets) == 0 {
+		presets = defaultPresets
+	}
+	out := make([]core.ModePreset, 0, len(presets))
+	for _, p := range presets {
+		p.Effort = normalizeEffort(p.Effort)
+		out = append(out, p)
+	}
+	return out
+}
+
+// parsePresets reads presets from the opts value produced by TOML decoding.
+// Supported shapes: []core.ModePreset, []any of map[string]any, or a single
+// map[string]any. Entries missing a name or model are skipped.
+func parsePresets(v any) []core.ModePreset {
+	switch t := v.(type) {
+	case []core.ModePreset:
+		return t
+	case []map[string]any:
+		out := make([]core.ModePreset, 0, len(t))
+		for _, m := range t {
+			if p, ok := presetFromMap(m); ok {
+				out = append(out, p)
+			}
+		}
+		return out
+	case []any:
+		out := make([]core.ModePreset, 0, len(t))
+		for _, item := range t {
+			if m, ok := item.(map[string]any); ok {
+				if p, ok := presetFromMap(m); ok {
+					out = append(out, p)
+				}
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func presetFromMap(m map[string]any) (core.ModePreset, bool) {
+	name, _ := m["name"].(string)
+	model, _ := m["model"].(string)
+	name = strings.TrimSpace(name)
+	model = strings.TrimSpace(model)
+	if name == "" || model == "" {
+		return core.ModePreset{}, false
+	}
+	effort, _ := m["effort"].(string)
+	desc, _ := m["desc"].(string)
+	return core.ModePreset{
+		Name:   name,
+		Model:  model,
+		Effort: strings.TrimSpace(effort),
+		Desc:   strings.TrimSpace(desc),
+	}, true
 }
 
 func (a *Agent) configuredModels() []core.ModelOption {
@@ -767,6 +842,9 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	}
 	if a.reasoningEffort != "" {
 		opts["reasoning_effort"] = a.reasoningEffort
+	}
+	if len(a.presets) > 0 {
+		opts["presets"] = append([]core.ModePreset(nil), a.presets...)
 	}
 	if len(a.allowedTools) > 0 {
 		opts["allowed_tools"] = stringsToAny(a.allowedTools)

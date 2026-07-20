@@ -198,16 +198,16 @@ type Engine struct {
 	userRoles    *UserRoleManager // nil = legacy mode (no per-user policies)
 	userRolesMu  sync.RWMutex     // protects userRoles, disabledCmds, and adminFrom
 
-	rateLimiter      *RateLimiter
-	outgoingRL       *OutgoingRateLimiter
-	streamPreview    StreamPreviewCfg
-	references       ReferenceRenderCfg
-	relayManager     *RelayManager
-	eventIdleTimeout time.Duration
+	rateLimiter       *RateLimiter
+	outgoingRL        *OutgoingRateLimiter
+	streamPreview     StreamPreviewCfg
+	references        ReferenceRenderCfg
+	relayManager      *RelayManager
+	eventIdleTimeout  time.Duration
 	maxQueuedMessages int
-	dirHistory       *DirHistory
-	baseWorkDir      string
-	projectState     *ProjectStateStore
+	dirHistory        *DirHistory
+	baseWorkDir       string
+	projectState      *ProjectStateStore
 
 	// Auto-compress settings
 	autoCompressEnabled   bool
@@ -409,7 +409,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		streamPreview:         DefaultStreamPreviewCfg(),
 		references:            DefaultReferenceRenderCfg(),
 		eventIdleTimeout:      defaultEventIdleTimeout,
-		maxQueuedMessages:    defaultMaxQueuedMessages,
+		maxQueuedMessages:     defaultMaxQueuedMessages,
 		showContextIndicator:  true,
 		telemetry:             NoopTelemetryCollector(),
 	}
@@ -1675,6 +1675,12 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		case isPsPrefix(content):
 			content = "/ps " + extractPsText(content)
 			msg.Content = content
+		case strings.EqualFold(content, "preset"), strings.EqualFold(content, "presets"):
+			content = "/preset"
+			msg.Content = content
+		case e.matchesPresetName(content):
+			content = "/preset " + strings.TrimSpace(content)
+			msg.Content = content
 		}
 	}
 
@@ -1822,7 +1828,6 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgSessionAutoResetIdle, int(e.resetOnIdle/time.Minute)))
 	return newSession
 }
-
 
 // queueMessageForBusySession queues a message for later delivery when the
 // session is busy. The message is NOT sent to agent stdin at queue time;
@@ -3786,6 +3791,7 @@ var builtinCommands = []struct {
 	{[]string{"model"}, "model"},
 	{[]string{"reasoning", "effort"}, "reasoning"},
 	{[]string{"mode"}, "mode"},
+	{[]string{"preset", "presets"}, "preset"},
 	{[]string{"lang"}, "lang"},
 	{[]string{"quiet"}, "quiet"},
 	{[]string{"provider"}, "provider"},
@@ -3986,6 +3992,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdReasoning(p, msg, args)
 	case "mode":
 		e.cmdMode(p, msg, args)
+	case "preset":
+		e.cmdPreset(p, msg, args)
 	case "lang":
 		e.cmdLang(p, msg, args)
 	case "quiet":
@@ -6166,6 +6174,7 @@ func helpCardGroups() []helpCardGroup {
 			items: []helpCardItem{
 				{command: "/model", action: "nav:/model"},
 				{command: "/reasoning", action: "nav:/reasoning"},
+				{command: "/preset", action: "cmd:/preset"},
 				{command: "/mode", action: "nav:/mode"},
 				{command: "/lang", action: "nav:/lang"},
 				{command: "/provider", action: "nav:/provider"},
@@ -6709,6 +6718,124 @@ func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 	e.sessions.Save()
 
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgReasoningChanged, target))
+}
+
+// matchesPresetName reports whether content exactly matches (case-insensitive)
+// one of the agent's configured preset names. This lets a bare "fable"/"opus"
+// switch presets on platforms where "/" is intercepted (e.g. Slack), the same
+// way bare "stop"/"new session" work.
+func (e *Engine) matchesPresetName(content string) bool {
+	ps, ok := e.agent.(PresetSwitcher)
+	if !ok {
+		return false
+	}
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return false
+	}
+	for _, preset := range ps.AvailablePresets() {
+		if strings.EqualFold(preset.Name, content) {
+			return true
+		}
+	}
+	return false
+}
+
+// cmdPreset applies a named model+effort bundle. Presets compose the agent's
+// ModelSwitcher and ReasoningEffortSwitcher so one command switches both.
+func (e *Engine) cmdPreset(p Platform, msg *Message, args []string) {
+	agent, sessions, interactiveKey, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
+	}
+
+	provider, ok := agent.(PresetSwitcher)
+	if !ok {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPresetNotSupported))
+		return
+	}
+	modelSwitcher, hasModel := agent.(ModelSwitcher)
+	effortSwitcher, hasEffort := agent.(ReasoningEffortSwitcher)
+	if !hasModel || !hasEffort {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPresetNotSupported))
+		return
+	}
+
+	presets := provider.AvailablePresets()
+	if len(presets) == 0 {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPresetNotSupported))
+		return
+	}
+
+	if len(args) == 0 {
+		curModel := modelSwitcher.GetModel()
+		curEffort := effortSwitcher.GetReasoningEffort()
+		var sb strings.Builder
+		sb.WriteString(e.i18n.T(MsgPresetListTitle))
+		sb.WriteString("\n")
+		var buttons [][]ButtonOption
+		var row []ButtonOption
+		for i, ps := range presets {
+			marker := "  "
+			if ps.Model == curModel && ps.Effort == curEffort {
+				marker = "> "
+			}
+			desc := ps.Desc
+			if desc == "" {
+				desc = fmt.Sprintf("%s + %s", ps.Model, ps.Effort)
+			}
+			sb.WriteString(fmt.Sprintf("%s%d. %s — %s\n", marker, i+1, ps.Name, desc))
+
+			label := ps.Name
+			if marker == "> " {
+				label = "▶ " + label
+			}
+			row = append(row, ButtonOption{Text: label, Data: fmt.Sprintf("cmd:/preset %d", i+1)})
+			if len(row) >= 3 {
+				buttons = append(buttons, row)
+				row = nil
+			}
+		}
+		if len(row) > 0 {
+			buttons = append(buttons, row)
+		}
+		sb.WriteString("\n")
+		sb.WriteString(e.i18n.T(MsgPresetUsage))
+		e.replyWithButtons(p, msg.ReplyCtx, sb.String(), buttons)
+		return
+	}
+
+	target := strings.ToLower(strings.TrimSpace(args[0]))
+	var selected *ModePreset
+	if idx, aerr := strconv.Atoi(target); aerr == nil && idx >= 1 && idx <= len(presets) {
+		selected = &presets[idx-1]
+	} else {
+		for i := range presets {
+			if strings.EqualFold(presets[i].Name, target) {
+				selected = &presets[i]
+				break
+			}
+		}
+	}
+	if selected == nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPresetUsage))
+		return
+	}
+
+	if _, err = e.switchModelOnAgent(agent, selected.Model, agent == e.agent); err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChangeFailed, err))
+		return
+	}
+	effortSwitcher.SetReasoningEffort(selected.Effort)
+
+	e.cleanupInteractiveState(interactiveKey)
+	s := sessions.GetOrCreateActive(msg.SessionKey)
+	s.SetAgentSessionID("", "")
+	s.ClearHistory()
+	sessions.Save()
+
+	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgPresetChanged, selected.Name, selected.Model, selected.Effort))
 }
 
 func (e *Engine) cmdMode(p Platform, msg *Message, args []string) {

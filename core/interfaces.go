@@ -402,6 +402,22 @@ type ReasoningEffortSwitcher interface {
 	AvailableReasoningEfforts() []string
 }
 
+// ModePreset bundles a model and a reasoning effort under a single name so a
+// user can switch both at once (e.g. "fable" = fable model + high effort).
+type ModePreset struct {
+	Name   string // preset identifier used in /preset <name>
+	Model  string // model applied via ModelSwitcher
+	Effort string // reasoning effort applied via ReasoningEffortSwitcher
+	Desc   string // short human-readable description
+}
+
+// PresetSwitcher is an optional interface for agents that expose named presets
+// bundling a model + reasoning effort. The engine applies a preset by driving
+// the agent's ModelSwitcher and ReasoningEffortSwitcher together.
+type PresetSwitcher interface {
+	AvailablePresets() []ModePreset
+}
+
 // ModelOption describes a selectable model.
 type ModelOption struct {
 	Name  string // model identifier passed to CLI
