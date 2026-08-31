@@ -8277,7 +8277,16 @@ func TestCmdCronExec_TriggersJob(t *testing.T) {
 			deadline := time.Now().Add(2 * time.Second)
 			for time.Now().Before(deadline) {
 				sent := platform.getSent()
-				if sentContains(sent, "triggered") && sentContains(sent, "manual run complete") {
+				store.mu.Lock()
+				persisted := false
+				for _, storedJob := range store.jobs {
+					if storedJob.ID == job.ID {
+						persisted = !storedJob.LastRun.IsZero()
+						break
+					}
+				}
+				store.mu.Unlock()
+				if sentContains(sent, "triggered") && sentContains(sent, "manual run complete") && persisted {
 					return
 				}
 				time.Sleep(10 * time.Millisecond)
