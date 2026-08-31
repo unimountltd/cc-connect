@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -561,115 +560,6 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 }
 
 var _ core.FileSender = (*Platform)(nil)
-
-// ── Message update & preview (compact progress) ────────────────
-
-type slackPreviewHandle struct {
-	channel   string
-	timestamp string
-}
-
-func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content string) (any, error) {
-	rc, ok := rctx.(replyContext)
-	if !ok {
-		return nil, fmt.Errorf("slack: SendPreviewStart: invalid reply context type %T", rctx)
-	}
-	opts := []slack.MsgOption{
-		slack.MsgOptionText(core.MarkdownToSlackMrkdwn(content), false),
-	}
-	if rc.timestamp != "" {
-		opts = append(opts, slack.MsgOptionPostMessageParameters(slack.PostMessageParameters{ThreadTimestamp: rc.timestamp}))
-	}
-	channel, ts, err := p.client.PostMessageContext(ctx, rc.channel, opts...)
-	if err != nil {
-		return nil, fmt.Errorf("slack: send preview: %w", err)
-	}
-	return &slackPreviewHandle{channel: channel, timestamp: ts}, nil
-}
-
-func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content string) error {
-	h, ok := previewHandle.(*slackPreviewHandle)
-	if !ok {
-		return fmt.Errorf("slack: UpdateMessage: invalid preview handle type %T", previewHandle)
-	}
-	_, _, _, err := p.client.UpdateMessageContext(ctx, h.channel, h.timestamp,
-		slack.MsgOptionText(core.MarkdownToSlackMrkdwn(content), false))
-	if err == nil {
-		return nil
-	}
-	if strings.Contains(err.Error(), "message_not_found") {
-		return nil // message was deleted; nothing to update
-	}
-
-	// Slack tier-3 rate limit on chat.update is easy to hit during long,
-	// busy turns. If Slack tells us exactly how long to wait and it fits
-	// inside the caller's context deadline, do a single bounded retry so
-	// we recover without the progress card freezing.
-	var rle *slack.RateLimitedError
-	if errors.As(err, &rle) && rle.RetryAfter > 0 {
-		if p.waitWithinDeadline(ctx, rle.RetryAfter) {
-			_, _, _, retryErr := p.client.UpdateMessageContext(ctx, h.channel, h.timestamp,
-				slack.MsgOptionText(core.MarkdownToSlackMrkdwn(content), false))
-			if retryErr == nil {
-				return nil
-			}
-			if strings.Contains(retryErr.Error(), "message_not_found") {
-				return nil
-			}
-			return fmt.Errorf("slack: update message (after retry): %w", retryErr)
-		}
-	}
-	return fmt.Errorf("slack: update message: %w", err)
-}
-
-// waitWithinDeadline sleeps for d if and only if the remaining context
-// budget can cover it (with a small buffer). Returns true when it slept
-// fully, false when the wait would exceed the deadline (in which case the
-// caller should surface the original error instead of retrying).
-func (p *Platform) waitWithinDeadline(ctx context.Context, d time.Duration) bool {
-	if d <= 0 {
-		return true
-	}
-	deadline, ok := ctx.Deadline()
-	if ok {
-		// Need d plus a small buffer to actually make the retry call.
-		if time.Until(deadline) < d+500*time.Millisecond {
-			return false
-		}
-	}
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-		return true
-	case <-ctx.Done():
-		return false
-	}
-}
-
-func (p *Platform) DeletePreviewMessage(ctx context.Context, previewHandle any) error {
-	h, ok := previewHandle.(*slackPreviewHandle)
-	if !ok {
-		return fmt.Errorf("slack: DeletePreviewMessage: invalid preview handle type %T", previewHandle)
-	}
-	_, _, err := p.client.DeleteMessageContext(ctx, h.channel, h.timestamp)
-	if err != nil {
-		if strings.Contains(err.Error(), "message_not_found") {
-			return nil
-		}
-		return fmt.Errorf("slack: delete message: %w", err)
-	}
-	return nil
-}
-
-func (p *Platform) ProgressStyle() string {
-	return "compact"
-}
-
-var _ core.MessageUpdater = (*Platform)(nil)
-var _ core.PreviewStarter = (*Platform)(nil)
-var _ core.PreviewCleaner = (*Platform)(nil)
-var _ core.ProgressStyleProvider = (*Platform)(nil)
 
 func (p *Platform) downloadSlackFile(url string) ([]byte, error) {
 	if url == "" {

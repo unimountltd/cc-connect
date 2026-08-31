@@ -54,10 +54,6 @@ Listed roughly newest-first within each section. Commit hashes link to fork hist
   `ProgressStyleProvider`. Tool calls collapse into a single auto-updating message
   instead of one message per tool. Compact mode shows only the latest entry.
 
-- **Direct file uploads** (`703fd793`)
-  Slack platform implements `FileSender` via `UploadFileV2Context`, mirroring the
-  existing image upload path.
-
 - **Completion reactions** (`ca15ee0f`, `924eb1a1`)
   `:female-technologist:` while in progress, `:checkered_flag:` on success,
   `:woman-raising-hand:` on failure. Adds `CompletionReactor` and `EmojiReactor`
@@ -119,10 +115,6 @@ Listed roughly newest-first within each section. Commit hashes link to fork hist
   to disk in `projectstate.json` so it survives daemon restarts. Label was renamed
   from `[inject: ...]` → `[keep in mind: ...]` to reduce prompt-injection signal.
 
-- **Sender name injection** (`924eb1a1`)
-  `inject_sender` header now includes the sender display name so agents can identify
-  who sent a message by name in shared channels.
-
 ## Telemetry (PostHog)
 
 - **Per-turn PostHog collector + `cc-connect usage` CLI** (`d8476876`)
@@ -158,10 +150,6 @@ Listed roughly newest-first within each section. Commit hashes link to fork hist
 - **Native ARM64 build workflow** (`9dd46fce`)
   Builds on `ubuntu-24.04-arm` and `macos-14` (Apple Silicon) runners. Uploaded as
   artifacts on every push/PR and attached to GitHub releases.
-
-- **Trimmed release matrix** (`c4945772`)
-  Release workflow ships `darwin/arm64` and `linux/arm64` only — the two platforms
-  this fork actually deploys to.
 
 - **Windows build tags for `run_as_user`** (`e6f9c6a6`)
   Adds the missing build tags so Windows builds don't drag in POSIX-only files.
@@ -234,10 +222,19 @@ Recorded so nobody re-adds the fork's version on a future merge.
   sets `DisplayCfg.Mode` / `DisplayCfg.CardMode`.
 
 - **Slack streaming preview** — upstream added `platform/slack/streaming.go`
-  duplicating the fork's `SendPreviewStart` / `UpdateMessage`. The file was removed
-  and upstream's two improvements (thread targeting, `MarkdownToSlackMrkdwn`) were
-  folded into the fork's implementation, which keeps its `message_not_found`
-  handling and rate-limit bounded retry.
+  with `SendPreviewStart` / `UpdateMessage`. The fork now keeps that upstream file
+  and layers only its remaining additions there: `message_not_found` handling,
+  bounded rate-limit retry, preview cleanup, and compact progress style.
+
+- **Slack direct file uploads** — upstream now implements the same `FileSender`
+  behavior, so the fork carries no separate implementation.
+
+- **Sender display-name injection** — upstream's `inject_sender` prompt already
+  includes the display name, so the fork's duplicate implementation was removed.
+
+- **Full release matrix** — the fork's ARM64-only `Makefile` matrix was retired.
+  Builds again include upstream's Linux, macOS, and Windows amd64/arm64 targets;
+  the fork-specific native ARM64 CI workflow remains an additional workflow.
 
 ### Upstream behaviour adopted over the fork's
 

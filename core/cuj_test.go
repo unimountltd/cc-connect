@@ -126,8 +126,10 @@ type cujAgentSession struct {
 	pendingDelayMs int
 
 	// observed
-	sentPrompts []string
-	closeCount  int
+	sentPrompts    []string
+	receivedImages int
+	receivedFiles  int
+	closeCount     int
 }
 
 // atomic_bool is intentionally lowercase to avoid clash with stdlib atomic.Bool
@@ -147,9 +149,11 @@ func newCUJAgentSession() *cujAgentSession {
 	}
 }
 
-func (s *cujAgentSession) Send(prompt string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+func (s *cujAgentSession) Send(prompt string, _ string, images []ImageAttachment, files []FileAttachment) error {
 	s.mu.Lock()
 	s.sentPrompts = append(s.sentPrompts, prompt)
+	s.receivedImages += len(images)
+	s.receivedFiles += len(files)
 	reply := s.reply
 	delay := s.delayMs
 	override := s.nextEventOverride
@@ -209,6 +213,12 @@ func (s *cujAgentSession) getSentPrompts() []string {
 	out := make([]string, len(s.sentPrompts))
 	copy(out, s.sentPrompts)
 	return out
+}
+
+func (s *cujAgentSession) attachmentCounts() (images, files int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.receivedImages, s.receivedFiles
 }
 
 // ---------------------------------------------------------------------------
@@ -1140,10 +1150,14 @@ func TestCUJ_A3_ImageReachesAgent(t *testing.T) {
 	deadline := time.After(2 * time.Second)
 	for {
 		agent.mu.Lock()
-		n := len(agent.sessions)
-		agent.mu.Unlock()
-		if n > 0 {
-			break
+		if len(agent.sessions) > 0 {
+			images, _ := agent.sessions[0].attachmentCounts()
+			agent.mu.Unlock()
+			if images == 1 && len(plat.getSent()) > 0 {
+				return
+			}
+		} else {
+			agent.mu.Unlock()
 		}
 		select {
 		case <-deadline:
@@ -1204,10 +1218,14 @@ func TestCUJ_A5_FileReachesAgent(t *testing.T) {
 	deadline := time.After(2 * time.Second)
 	for {
 		agent.mu.Lock()
-		n := len(agent.sessions)
-		agent.mu.Unlock()
-		if n > 0 {
-			return
+		if len(agent.sessions) > 0 {
+			_, files := agent.sessions[0].attachmentCounts()
+			agent.mu.Unlock()
+			if files == 1 && len(plat.getSent()) > 0 {
+				return
+			}
+		} else {
+			agent.mu.Unlock()
 		}
 		select {
 		case <-deadline:

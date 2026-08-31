@@ -347,6 +347,13 @@ func main() {
 	config.ConfigPath = configPath
 	slog.Info("config loaded", "path", configPath)
 
+	if len(cfg.Projects) == 0 {
+		fmt.Fprintf(os.Stderr, "Error: no projects configured in %s\n", configPath)
+		fmt.Fprintln(os.Stderr, "Add at least one [[project]] section to your config.toml, or run:")
+		fmt.Fprintln(os.Stderr, "  cc-connect init")
+		os.Exit(1)
+	}
+
 	setupLogger(cfg.Log.Level, logWriter)
 
 	// run_as_user preflight + isolation audit. MUST run before any engine
@@ -436,6 +443,7 @@ func main() {
 		engine.SetFilterExternalSessions(proj.FilterExternalSessions != nil && *proj.FilterExternalSessions)
 		engine.SetBaseWorkDir(workDir)
 		engine.SetProjectStateStore(projectState)
+		engine.SetDataDir(cfg.DataDir)
 
 		// Wire multi-workspace mode
 		if proj.Mode == "multi-workspace" {
@@ -450,6 +458,26 @@ func main() {
 			}
 			bindingStore := filepath.Join(cfg.DataDir, "workspace_bindings.json")
 			engine.SetMultiWorkspace(baseDir, bindingStore)
+			if proj.WorkspaceInitAllowLocalPaths != nil {
+				engine.SetWorkspaceInitAllowLocalPaths(*proj.WorkspaceInitAllowLocalPaths)
+			}
+			idleMins := cfg.WorkspaceIdleTimeoutMins
+			if idleMins == nil && proj.WorkspaceIdleTimeoutMinsLegacy != nil {
+				slog.Warn("workspace_idle_timeout_mins under [[projects]] is deprecated; move it to the top level of config.toml. Honoring the legacy value for backwards compatibility.",
+					"project", proj.Name, "value", *proj.WorkspaceIdleTimeoutMinsLegacy)
+				idleMins = proj.WorkspaceIdleTimeoutMinsLegacy
+			}
+			if idleMins != nil {
+				mins := *idleMins
+				if mins <= 0 {
+					engine.SetWorkspaceIdleTimeout(0)
+				} else {
+					engine.SetWorkspaceIdleTimeout(time.Duration(mins) * time.Minute)
+				}
+			}
+			if proj.SkipGit != nil {
+				engine.SetSkipGit(*proj.SkipGit)
+			}
 			slog.Info("multi-workspace mode enabled", "project", proj.Name, "base_dir", baseDir)
 		}
 
@@ -597,6 +625,14 @@ func main() {
 			engine.SetStreamPreviewCfg(spcfg)
 		}
 
+		// Wire instant reply
+		if cfg.InstantReply.Enabled != nil && *cfg.InstantReply.Enabled {
+			engine.SetInstantReply(core.InstantReplyCfg{
+				Enabled: true,
+				Content: cfg.InstantReply.Content,
+			})
+		}
+
 		// Wire rate limiting
 		{
 			maxMsg := 20
@@ -678,8 +714,11 @@ func main() {
 			}
 			engine.SetAutoCompressConfig(true, maxTokens, minGap)
 		}
-		if proj.ResetOnIdleMins != nil {
-			engine.SetResetOnIdle(time.Duration(*proj.ResetOnIdleMins) * time.Minute)
+		resetIdle, defaulted := resolveResetOnIdle(proj.ResetOnIdleMins)
+		engine.SetResetOnIdle(resetIdle)
+		if defaulted {
+			slog.Info("project: reset_on_idle_mins not set, applying default — set reset_on_idle_mins = 0 to opt out, see docs/usage.md",
+				"project", proj.Name, "default_minutes", defaultResetOnIdleMins)
 		}
 		if proj.AgentSessionIdleTimeoutMins != nil {
 			mins := *proj.AgentSessionIdleTimeoutMins
@@ -1033,7 +1072,17 @@ func main() {
 		if path == "" {
 			path = "/bridge/ws"
 		}
-		bridgeSrv = core.NewBridgeServer(port, cfg.Bridge.Token, path, cfg.Bridge.CORSOrigins)
+		// Check insecure flag for local development mode
+		insecure := cfg.Bridge.Insecure != nil && *cfg.Bridge.Insecure
+		if insecure {
+			bridgeSrv = core.NewBridgeServerInsecure(port, cfg.Bridge.Token, path, cfg.Bridge.CORSOrigins)
+		} else {
+			bridgeSrv = core.NewBridgeServer(port, cfg.Bridge.Token, path, cfg.Bridge.CORSOrigins)
+		}
+		if bridgeSrv == nil {
+			slog.Error("bridge: failed to create server - token is required (or set insecure=true for local dev)")
+			os.Exit(1)
+		}
 		for i, e := range engines {
 			bp := bridgeSrv.NewPlatform(cfg.Projects[i].Name)
 			bridgeSrv.RegisterEngine(cfg.Projects[i].Name, e, bp)
@@ -1320,7 +1369,9 @@ func main() {
 	// shutdown (stdin EOF → SIGTERM → SIGKILL) can take up to 130s and
 	// must not block a replacement instance from acquiring the lock.
 	for _, e := range engines {
-		e.StopPlatforms()
+		if err := e.StopPlatforms(); err != nil {
+			slog.Error("shutdown platform error", "error", err)
+		}
 	}
 	instanceLock.Release()
 	for _, e := range engines {
@@ -1609,7 +1660,7 @@ Flags:
   --help             Show this help message
 
 Commands:
-  daemon             Manage cc-connect as a background service (systemd/launchd)
+  daemon             Manage cc-connect as a background service (systemd/launchd/schtasks)
     install          Install and start the daemon service
     uninstall        Remove the daemon service
     start            Start the daemon
@@ -1779,10 +1830,11 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	} else {
 		engine.SetAutoCompressConfig(false, 0, 0)
 	}
-	if proj.ResetOnIdleMins != nil {
-		engine.SetResetOnIdle(time.Duration(*proj.ResetOnIdleMins) * time.Minute)
-	} else {
-		engine.SetResetOnIdle(0)
+	resetIdle, defaulted := resolveResetOnIdle(proj.ResetOnIdleMins)
+	engine.SetResetOnIdle(resetIdle)
+	if defaulted {
+		slog.Info("project: reset_on_idle_mins not set, applying default — set reset_on_idle_mins = 0 to opt out, see docs/usage.md",
+			"project", proj.Name, "default_minutes", defaultResetOnIdleMins)
 	}
 	if proj.AgentSessionIdleTimeoutMins != nil {
 		mins := *proj.AgentSessionIdleTimeoutMins
@@ -1795,6 +1847,16 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		// A reload may remove this option after timers were scheduled; reset
 		// explicitly so those stale idle-close timers cannot fire later.
 		engine.SetAgentSessionIdleTimeout(0)
+	}
+
+	// Reload instant reply
+	if cfg.InstantReply.Enabled != nil && *cfg.InstantReply.Enabled {
+		engine.SetInstantReply(core.InstantReplyCfg{
+			Enabled: true,
+			Content: cfg.InstantReply.Content,
+		})
+	} else {
+		engine.SetInstantReply(core.InstantReplyCfg{})
 	}
 
 	// Reload sender injection

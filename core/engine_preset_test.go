@@ -41,6 +41,31 @@ func TestCmdPreset_ByNameSetsModelAndEffort(t *testing.T) {
 	}
 }
 
+// Regression: the upstream merge kept cmdPreset but dropped "preset" from
+// builtinCommands, so real platform messages fell through to the agent as an
+// unknown slash command. Drive the public platform entrypoint to cover command
+// resolution as well as the implementation.
+func TestPresetCommand_RoutesThroughReceiveMessage(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubPresetAgent{}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.ReceiveMessage(p, &Message{
+		SessionKey: "plain:chat:user1",
+		Platform:   "plain",
+		UserID:     "user1",
+		ReplyCtx:   "ctx",
+		Content:    "/preset opus",
+	})
+
+	if agent.model != "opus" || agent.reasoningEffort != "high" {
+		t.Fatalf("/preset opus => model=%q effort=%q, want opus/high", agent.model, agent.reasoningEffort)
+	}
+	if sent := p.getSent(); len(sent) == 0 || sent[len(sent)-1] != e.i18n.Tf(MsgPresetChanged, "opus", "opus", "high") {
+		t.Fatalf("/preset reply = %v, want preset confirmation", sent)
+	}
+}
+
 func TestCmdPreset_ByNumberSelectsPreset(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	agent := &stubPresetAgent{}

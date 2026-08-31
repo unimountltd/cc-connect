@@ -13,8 +13,12 @@ LDFLAGS := -s -w \
   -X main.buildTime=$(BUILD_TIME)
 
 PLATFORMS := \
+  linux/amd64 \
   linux/arm64 \
-  darwin/arm64
+  darwin/amd64 \
+  darwin/arm64 \
+  windows/amd64 \
+  windows/arm64
 
 # ---------------------------------------------------------------------------
 # Selective compilation via build tags.
@@ -29,10 +33,8 @@ PLATFORMS := \
 #   make build EXCLUDE=discord,dingtalk,qq,qqbot,line
 # ---------------------------------------------------------------------------
 
-ALL_AGENTS    := acp antigravity claudecode codex copilot cursor devin gemini iflow kimi opencode pi qoder tmux
-ALL_PLATFORMS := feishu telegram discord slack dingtalk wecom weixin qq qqbot line weibo max matrix webex wps-agentspace tuitui
 ALL_AGENTS    := acp antigravity claudecode codex copilot cursor devin gemini iflow kimi opencode pi qoder reasonix tmux
-ALL_PLATFORMS := feishu telegram discord slack dingtalk wecom weixin qq qqbot line weibo max matrix webex cloud_web tuitui googlechat
+ALL_PLATFORMS := feishu telegram discord slack dingtalk wecom weixin qq qqbot line weibo max matrix webex cloud_web tuitui googlechat wps_agentspace wps_xiezuo yuanbao
 ALL_EXTRAS    := web
 
 COMMA := ,

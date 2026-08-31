@@ -340,6 +340,13 @@ type DisplayCfg struct {
 	HideAgentFooter  bool // strip model/token footer lines emitted as agent text
 }
 
+// InstantReplyCfg controls the immediate confirmation reply sent when a message
+// is received, before the agent starts processing.
+type InstantReplyCfg struct {
+	Enabled bool
+	Content string // custom reply text; empty = use i18n MsgStarting default
+}
+
 // RateLimitCfg controls per-session message rate limiting.
 type RateLimitCfg struct {
 	MaxMessages int           // max messages per window; 0 = disabled
@@ -804,6 +811,10 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 	return e
 }
 
+// DefaultWorkspaceIdleTimeout is the default time a workspace can be idle
+// before the reaper reclaims it.
+const DefaultWorkspaceIdleTimeout = 15 * time.Minute
+
 // SetMultiWorkspace enables multi-workspace mode for the engine.
 func (e *Engine) SetMultiWorkspace(baseDir, bindingStorePath string) {
 	e.multiWorkspace = true
@@ -812,6 +823,22 @@ func (e *Engine) SetMultiWorkspace(baseDir, bindingStorePath string) {
 	e.workspacePool = newWorkspacePool(DefaultWorkspaceIdleTimeout)
 	e.initFlows = make(map[string]*workspaceInitFlow)
 	go e.runIdleReaper()
+}
+
+// SetWorkspaceIdleTimeout overrides the workspace idle reaper timeout.
+// Must be called after SetMultiWorkspace. A zero value disables reaping.
+func (e *Engine) SetWorkspaceIdleTimeout(d time.Duration) {
+	if e.workspacePool != nil {
+		e.workspacePool.mu.Lock()
+		e.workspacePool.idleTimeout = d
+		e.workspacePool.mu.Unlock()
+	}
+}
+
+// SetWorkspaceInitAllowLocalPaths controls whether workspace init accepts
+// existing local directories as targets. When false, init remains git-URL only.
+func (e *Engine) SetWorkspaceInitAllowLocalPaths(allow bool) {
+	e.workspaceInitAllowLocalPaths = allow
 }
 
 func (e *Engine) runIdleReaper() {
@@ -893,6 +920,11 @@ func (e *Engine) SetTTSSaveFunc(fn func(mode string) error) {
 // SetDisplayConfig overrides the default truncation settings.
 func (e *Engine) SetDisplayConfig(cfg DisplayCfg) {
 	e.display = cfg
+}
+
+// SetInstantReply configures the immediate confirmation reply.
+func (e *Engine) SetInstantReply(cfg InstantReplyCfg) {
+	e.instantReply = cfg
 }
 
 // SetReferenceConfig configures local reference normalization/rendering.
@@ -1191,6 +1223,7 @@ func (e *Engine) GetDisabledCommands() []string {
 	for k := range e.disabledCmds {
 		out = append(out, k)
 	}
+	sort.Strings(out)
 	return out
 }
 
@@ -1403,6 +1436,10 @@ func (e *Engine) SetBaseWorkDir(dir string) {
 
 func (e *Engine) SetProjectStateStore(store *ProjectStateStore) {
 	e.projectState = store
+}
+
+func (e *Engine) SetDataDir(dir string) {
+	e.dataDir = dir
 }
 
 // RemoveCommand removes a custom command by name. Returns false if not found.
@@ -2191,6 +2228,51 @@ func (e *Engine) executeCronShell(p Platform, replyCtx any, job *CronJob) error 
 	}
 }
 
+func (e *Engine) finishCronShell(p Platform, replyCtx any, cmd *exec.Cmd, mu *sync.Mutex, buf *bytes.Buffer, cmdLabel string, opts ...any) error {
+	mu.Lock()
+	output := buf.String()
+	mu.Unlock()
+
+	exitOK := cmd.ProcessState.ExitCode() == 0
+
+	var finalMsg string
+	if exitOK {
+		result := strings.TrimSpace(output)
+		if result == "" {
+			result = "(no output)"
+		}
+		finalMsg = fmt.Sprintf("⏰ ✅ `%s`\n\n%s", cmdLabel, truncateStr(result, 3000))
+	} else {
+		errMsg := output
+		if errMsg != "" {
+			finalMsg = fmt.Sprintf("⏰ ❌ `%s`\n\n%s\n\nerror: exit code %d", cmdLabel, truncateStr(errMsg, 3000), cmd.ProcessState.ExitCode())
+		} else {
+			finalMsg = fmt.Sprintf("⏰ ❌ `%s`\n\nerror: exit code %d", cmdLabel, cmd.ProcessState.ExitCode())
+		}
+	}
+
+	if len(opts) >= 2 {
+		if useUpdate, ok := opts[0].(bool); ok && useUpdate {
+			if handle := opts[1]; handle != nil {
+				_ = updaterFor(p).UpdateMessage(e.ctx, handle, finalMsg)
+				if !exitOK {
+					return fmt.Errorf("shell: exit code %d", cmd.ProcessState.ExitCode())
+				}
+				return nil
+			}
+		}
+	}
+
+	e.send(p, replyCtx, finalMsg)
+	if !exitOK {
+		return fmt.Errorf("shell: exit code %d", cmd.ProcessState.ExitCode())
+	}
+	return nil
+}
+
+// ExecuteHeartbeat runs a heartbeat check by injecting a synthetic message
+// into the main session, similar to cron but designed for periodic awareness.
+
 func (e *Engine) ExecuteHeartbeat(sessionKey, prompt string, silent bool) error {
 	platformName := ""
 	if idx := strings.Index(sessionKey, ":"); idx > 0 {
@@ -2304,11 +2386,11 @@ func (e *Engine) Start() error {
 // instance lock early: disconnect platforms (no more duplicate messages),
 // release the lock (allow a new instance to start), then call Stop() to
 // close agent sessions gracefully.
-func (e *Engine) StopPlatforms() {
+func (e *Engine) StopPlatforms() error {
 	e.platformLifecycleMu.Lock()
 	if e.stopping {
 		e.platformLifecycleMu.Unlock()
-		return
+		return nil
 	}
 	e.stopping = true
 	e.platformLifecycleMu.Unlock()
@@ -2319,11 +2401,16 @@ func (e *Engine) StopPlatforms() {
 		e.observeCancel()
 	}
 
+	var errs []error
 	for _, p := range e.platforms {
 		if err := p.Stop(); err != nil {
-			slog.Warn("engine: stop platform", "platform", p.Name(), "error", err)
+			errs = append(errs, fmt.Errorf("stop platform %s: %w", p.Name(), err))
 		}
 	}
+	if len(errs) > 0 {
+		return fmt.Errorf("engine stop errors: %v", errs)
+	}
+	return nil
 }
 
 func (e *Engine) Stop() error {
@@ -2332,6 +2419,7 @@ func (e *Engine) Stop() error {
 	e.stopping = true
 	e.platformLifecycleMu.Unlock()
 
+	var errs []error
 	if !alreadyStopping {
 		// Cancel first so late lifecycle callbacks observe shutdown immediately.
 		e.cancel()
@@ -2341,16 +2429,13 @@ func (e *Engine) Stop() error {
 		}
 
 		// Stop platforms after cancellation so they can unwind against the closed context.
-		var errs []error
 		for _, p := range e.platforms {
 			if err := p.Stop(); err != nil {
 				errs = append(errs, fmt.Errorf("stop platform %s: %w", p.Name(), err))
 			}
 		}
-		_ = errs // collected below
 	}
 
-	var errs []error
 	e.interactiveMu.Lock()
 	states := make(map[string]*interactiveState, len(e.interactiveStates))
 	for k, v := range e.interactiveStates {
@@ -3863,11 +3948,12 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 			return
 		}
 
-		// Drain any stale events left in the channel from a previous turn
-		// or failed attempt. This prevents the next processInteractiveEvents
-		// from reading an old EventResult that was pushed after the previous
-		// turn already returned.
-		drainEvents(state.agentSession.Events())
+		// The initial attempt already honored eventsNeedResync above. Only retry
+		// attempts may discard leftovers from the failed turn; draining here on
+		// attempt 1 would undo upstream's clean-turn event preservation.
+		if attempt > 1 {
+			drainEvents(state.agentSession.Events())
+		}
 
 		sendStart := time.Now()
 		state.mu.Lock()
@@ -4006,11 +4092,14 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 
 	// Create a new agent instance with this workspace's work_dir
 	opts := make(map[string]any)
+	// Let the agent seed its own base options (e.g. tmux session name)
 	if snapshotter, ok := e.agent.(WorkspaceAgentOptionSnapshotter); ok {
 		for k, v := range snapshotter.WorkspaceAgentOptions() {
 			opts[k] = v
 		}
 	}
+
+	// workspace-specific overrides always win
 	opts["work_dir"] = workspace
 
 	if e.projectState != nil {
@@ -4054,14 +4143,9 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 		}
 	}
 
-	// A model or reasoning effort chosen for this workspace via /model,
-	// /preset or /reasoning wins over the project-level default. Applied
-	// last so it survives both the idle reap that destroys this agent and
-	// a daemon restart.
+	// Upstream restores the workspace model above. The fork adds only the
+	// matching reasoning-effort persistence for /reasoning and /preset.
 	if e.projectState != nil {
-		if m := e.projectState.WorkspaceModelOverride(workspace); m != "" {
-			opts["model"] = m
-		}
 		if effort := e.projectState.WorkspaceEffortOverride(workspace); effort != "" {
 			opts["reasoning_effort"] = effort
 		}
@@ -4746,6 +4830,13 @@ func (e *Engine) notifySessionCloseFailure(sessionKey string, platform Platform,
 
 const defaultEventIdleTimeout = 2 * time.Hour
 
+// cardToolEntry stores a tool call record for card content rendering.
+type cardToolEntry struct {
+	Index int
+	Name  string
+	Input string
+}
+
 // phantomResultGrace bounds how long a turn waits for its real result after
 // a phantom one was ignored. If nothing else arrives within the window the
 // phantom is accepted as the turn's result after all, so a genuinely silent
@@ -5271,6 +5362,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			cp.Finalize(ProgressCardStateFailed)
 			sp.discard()
 			state.mu.Lock()
+			state.eventsNeedResync = true
 			p := state.platform
 			state.mu.Unlock()
 			e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session timed out (no response)"))
@@ -5325,11 +5417,17 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			e.cleanupInteractiveState(sessionKey, state)
 			return
 		case <-e.ctx.Done():
+			state.mu.Lock()
+			state.eventsNeedResync = true
+			state.mu.Unlock()
 			return
 		}
 
 		if state.isStopped() {
 			sp.discard()
+			state.mu.Lock()
+			state.eventsNeedResync = true
+			state.mu.Unlock()
 			return
 		}
 
@@ -6534,6 +6632,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 channelClosed:
 	// Channel closed - process exited unexpectedly
 	slog.Warn("agent process exited", "session_key", sessionKey)
+	state.mu.Lock()
+	state.eventsNeedResync = true
+	state.mu.Unlock()
 	e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent process exited"))
 	e.cleanupInteractiveState(sessionKey, state)
 	reactCompletion(false)
@@ -6594,6 +6695,52 @@ channelClosed:
 		}
 	}
 	return
+}
+
+func mergeRichToolResult(steps []ToolStep, event Event, result string, maxLen int) []ToolStep {
+	toolName := strings.TrimSpace(event.ToolName)
+	if toolName == "" {
+		toolName = "Tool"
+	}
+
+	idx := -1
+	for i := len(steps) - 1; i >= 0; i-- {
+		if steps[i].Kind == ToolStepKindThinking {
+			continue
+		}
+		if strings.TrimSpace(steps[i].Name) == "" || strings.TrimSpace(steps[i].Name) == toolName {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		summary := strings.TrimSpace(event.ToolInput)
+		if summary != "" {
+			summary = truncateIf(summary, maxLen)
+		}
+		steps = append(steps, ToolStep{
+			Kind:    ToolStepKindTool,
+			Name:    toolName,
+			Summary: summary,
+		})
+		idx = len(steps) - 1
+	}
+
+	if strings.TrimSpace(steps[idx].Name) == "" {
+		steps[idx].Name = toolName
+	}
+	if steps[idx].Kind == "" {
+		steps[idx].Kind = ToolStepKindTool
+	}
+	if strings.TrimSpace(steps[idx].Summary) == "" && strings.TrimSpace(event.ToolInput) != "" {
+		steps[idx].Summary = truncateIf(strings.TrimSpace(event.ToolInput), maxLen)
+	}
+	steps[idx].Result = result
+	steps[idx].Status = strings.TrimSpace(event.ToolStatus)
+	steps[idx].ExitCode = event.ToolExitCode
+	steps[idx].Success = event.ToolSuccess
+	steps[idx].Done = true
+	return steps
 }
 
 // notifyDroppedQueuedMessages drains pendingMessages from the state and
@@ -6716,6 +6863,7 @@ var builtinCommands = []struct {
 	{[]string{"model"}, "model"},
 	{[]string{"reasoning", "effort"}, "reasoning"},
 	{[]string{"mode"}, "mode"},
+	{[]string{"preset", "presets"}, "preset"},
 	{[]string{"lang"}, "lang"},
 	{[]string{"quiet"}, "quiet"},
 	{[]string{"provider"}, "provider"},
@@ -6727,6 +6875,7 @@ var builtinCommands = []struct {
 	{[]string{"stop"}, "stop"},
 	{[]string{"cancel"}, "cancel"},
 	{[]string{"help"}, "help"},
+	{[]string{"start"}, "start"},
 	{[]string{"version"}, "version"},
 	{[]string{"commands", "command", "cmd"}, "commands"},
 	{[]string{"skills", "skill"}, "skills"},
@@ -6746,6 +6895,7 @@ var builtinCommands = []struct {
 	{[]string{"whoami", "myid"}, "whoami"},
 	{[]string{"web"}, "web"},
 	{[]string{"diff"}, "diff"},
+	{[]string{"inject"}, "inject"},
 	{[]string{"ps", "btw"}, "ps"},
 }
 
@@ -7069,6 +7219,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdCancel(p, msg)
 	case "help":
 		e.cmdHelp(p, msg)
+	case "start":
+		e.cmdStart(p, msg)
 	case "version":
 		e.reply(p, msg.ReplyCtx, VersionInfo)
 	case "commands":
@@ -8262,6 +8414,28 @@ func appendReplyFooter(content, footer string) string {
 	return content + "\n\n*" + footer + "*"
 }
 
+func appendFinalMetadataToSegment(segment, fullResponse string) string {
+	segment = strings.TrimRight(segment, "\n ")
+	if segment == "" {
+		return fullResponse
+	}
+	fullResponse = strings.TrimSpace(fullResponse)
+	if fullResponse == "" || strings.TrimSpace(segment) == fullResponse {
+		return segment
+	}
+
+	metadata := ""
+	if idx := strings.LastIndex(fullResponse, "\n\n*"); idx >= 0 && strings.HasSuffix(fullResponse, "*") {
+		metadata = fullResponse[idx:]
+	} else if match := ctxSelfReportRe.FindString(fullResponse); match != "" {
+		metadata = "\n" + strings.TrimSpace(match)
+	}
+	if metadata == "" || strings.Contains(segment, strings.TrimSpace(metadata)) {
+		return segment
+	}
+	return segment + metadata
+}
+
 func (e *Engine) cmdShow(p Platform, msg *Message, args []string) {
 	rawRef := strings.TrimSpace(strings.Join(args, " "))
 	if rawRef == "" {
@@ -8595,32 +8769,7 @@ func (e *Engine) cmdShell(p Platform, msg *Message, raw string) {
 		workDir, _ = os.Getwd()
 	}
 
-	go func() {
-		ctx, cancel := context.WithTimeout(e.ctx, timeout)
-		defer cancel()
-
-		cmd := exec.CommandContext(ctx, "sh", "-c", shellCmd)
-		cmd.Dir = workDir
-		output, err := cmd.CombinedOutput()
-
-		if ctx.Err() == context.DeadlineExceeded {
-			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandTimeout), shellCmd))
-			return
-		}
-
-		result := strings.TrimSpace(string(output))
-		if err != nil && result == "" {
-			result = err.Error()
-		}
-		if result == "" {
-			result = "(no output)"
-		}
-		if runes := []rune(result); len(runes) > 4000 {
-			result = string(runes[:3997]) + "..."
-		}
-
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf("$ %s\n```\n%s\n```", shellCmd, result))
-	}()
+	go func() { _ = e.runShellWithProgress(p, msg.ReplyCtx, shellCmd, workDir, timeout, 4000) }()
 }
 
 func (e *Engine) cmdDiff(p Platform, msg *Message, raw string) {
@@ -9824,6 +9973,26 @@ func (e *Engine) cmdHelp(p Platform, msg *Message) {
 		return
 	}
 	e.replyWithCard(p, msg.ReplyCtx, e.renderHelpCard())
+}
+
+// cmdStart handles the `/start` slash command.
+//
+// On Telegram, `/start` is a protocol convention sent by the client when a
+// user first opens a bot (or taps the Start button). Without a native
+// handler, the message previously fell through to the default branch and
+// got forwarded verbatim to the agent — and Claude Code's CLI interprets a
+// leading "/" as a slash-command request, replying "Unknown command:
+// /start. Did you mean /stats?" instead of greeting the user.
+//
+// Replying with a localized welcome that names the project keeps the
+// behavior consistent with every other Telegram bot framework, and is a
+// no-op improvement on platforms where /start has no special meaning.
+func (e *Engine) cmdStart(p Platform, msg *Message) {
+	name := e.name
+	if name == "" {
+		name = e.agent.Name()
+	}
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgWelcome), name))
 }
 
 const defaultHelpGroup = "session"
@@ -12359,7 +12528,7 @@ func (e *Engine) resolveOutboundSessionTarget(sessionKey string, hasAttachments 
 		if targetPlatform != nil {
 			rc, ok := targetPlatform.(ReplyContextReconstructor)
 			if !ok {
-				return nil, nil, nil, fmt.Errorf("platform %q does not support proactive sends", targetPlatform.Name())
+				return nil, nil, nil, fmt.Errorf("platform %q does not support proactive messaging", targetPlatform.Name())
 			}
 			reconstructed, err := rc.ReconstructReplyCtx(strippedKey)
 			if err != nil {
@@ -12376,6 +12545,8 @@ func (e *Engine) resolveOutboundSessionTarget(sessionKey string, hasAttachments 
 	return state, p, replyCtx, nil
 }
 
+// sendPermissionPrompt sends a permission prompt with interactive buttons when
+// the platform supports them. Fallback chain: InlineButtonSender → CardSender → plain text.
 func (e *Engine) sendPermissionPrompt(p Platform, replyCtx any, prompt, toolName, toolInput string) {
 	e.hooks.Emit(HookEvent{
 		Event:    HookEventPermissionRequested,
@@ -13029,7 +13200,6 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 			if effort == target {
 				switcher.SetReasoningEffort(target)
 				interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
-				e.persistWorkspaceModelOverride(interactiveKey, sessionKey, agent, "")
 				e.persistWorkspaceEffortOverride(interactiveKey, sessionKey, agent, target)
 				e.cleanupInteractiveState(interactiveKey)
 				s := sessions.GetOrCreateActive(sessionKey)
@@ -13270,7 +13440,7 @@ func (e *Engine) getOrCreateDeleteModeState(sessionKey string, p Platform, reply
 	e.interactiveMu.Lock()
 	state, ok := e.interactiveStates[interactiveKey]
 	if !ok || state == nil {
-		state = &interactiveState{platform: p, replyCtx: replyCtx}
+		state = &interactiveState{platform: p, replyCtx: replyCtx, eventsNeedResync: true}
 		e.interactiveStates[interactiveKey] = state
 	} else {
 		state.platform = p
@@ -14094,6 +14264,35 @@ func (e *Engine) renderDirCard(sessionKey string, page int) (*Card, error) {
 // ──────────────────────────────────────────────────────────────
 // Navigable sub-cards (for in-place card updates)
 // ──────────────────────────────────────────────────────────────
+
+func (e *Engine) currentSessionDisplayName(agent Agent, sessions *SessionManager, agentID string) string {
+	if agentID == "" || agentID == e.i18n.T(MsgSessionNotStarted) {
+		return e.i18n.T(MsgUntitled)
+	}
+	displayName := sessions.GetSessionName(agentID)
+	if displayName != "" {
+		return displayName
+	}
+	agentSessions, err := agent.ListSessions(e.ctx)
+	if err == nil {
+		for _, as := range agentSessions {
+			if as.ID == agentID {
+				displayName = strings.ReplaceAll(as.Summary, "\n", " ")
+				displayName = strings.Join(strings.Fields(displayName), " ")
+				break
+			}
+		}
+	}
+	if displayName == "" {
+		if tp, ok := agent.(SessionTitleProvider); ok {
+			displayName = tp.GetSessionTitle(agentID)
+		}
+	}
+	if displayName == "" {
+		return e.i18n.T(MsgUntitled)
+	}
+	return displayName
+}
 
 func (e *Engine) renderCurrentCard(sessionKey string) *Card {
 	agent, sessions := e.sessionContextForKey(sessionKey)
@@ -15456,59 +15655,7 @@ func (e *Engine) executeShellCommand(p Platform, msg *Message, cmd *CustomComman
 		workDir, _ = os.Getwd()
 	}
 
-	// Create context with timeout
-	ctx, cancel := context.WithTimeout(e.ctx, 60*time.Second)
-	defer cancel()
-
-	// Execute command using the native shell so Windows config commands work too.
-	var shellCmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		shellCmd = exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", execCmd)
-	} else {
-		shellCmd = exec.CommandContext(ctx, "sh", "-c", execCmd)
-	}
-	shellCmd.Dir = workDir
-	envVars := []string{
-		"CC_PROJECT=" + e.name,
-		"CC_SESSION_KEY=" + msg.SessionKey,
-	}
-	// Prepend the cc-connect binary dir on Windows only (native shell fix);
-	// on Unix it would change command resolution for user scripts.
-	if runtime.GOOS == "windows" {
-		if exePath, err := os.Executable(); err == nil {
-			binDir := filepath.Dir(exePath)
-			if curPath := os.Getenv("PATH"); curPath != "" {
-				envVars = append(envVars, "PATH="+binDir+string(filepath.ListSeparator)+curPath)
-			} else {
-				envVars = append(envVars, "PATH="+binDir)
-			}
-		}
-	}
-	shellCmd.Env = MergeEnv(os.Environ(), envVars)
-	output, err := shellCmd.CombinedOutput()
-
-	if ctx.Err() == context.DeadlineExceeded {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandExecTimeout), cmd.Name))
-		return
-	}
-
-	if err != nil {
-		errMsg := string(output)
-		if errMsg == "" {
-			errMsg = err.Error()
-		}
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandExecError), cmd.Name, truncateStr(errMsg, 1000)))
-		return
-	}
-
-	result := strings.TrimSpace(string(output))
-	if result == "" {
-		result = e.i18n.T(MsgCommandExecSuccess)
-	} else if len(result) > 4000 {
-		result = result[:3997] + "..."
-	}
-
-	e.reply(p, msg.ReplyCtx, result)
+	_ = e.runShellWithProgress(p, msg.ReplyCtx, execCmd, workDir, 60*time.Second, 4000)
 }
 
 func (e *Engine) cmdCommands(p Platform, msg *Message, args []string) {
@@ -16016,7 +16163,7 @@ func (e *Engine) formatWhoamiText(msg *Message) string {
 		sb.WriteString(fmt.Sprintf("Platform: %s\n", msg.Platform))
 	}
 
-	chatID := extractChannelID(msg.SessionKey)
+	chatID := effectiveChannelID(msg)
 	if chatID != "" {
 		sb.WriteString(fmt.Sprintf("Chat ID: `%s`\n", chatID))
 	}
@@ -16041,7 +16188,7 @@ func (e *Engine) renderWhoamiCard(msg *Message) *Card {
 	if msg.Platform != "" {
 		body.WriteString(fmt.Sprintf("**%s:**  %s\n", e.i18n.T(MsgWhoamiPlatform), msg.Platform))
 	}
-	chatID := extractChannelID(msg.SessionKey)
+	chatID := effectiveChannelID(msg)
 	if chatID != "" {
 		body.WriteString(fmt.Sprintf("**Chat ID:**  `%s`\n", chatID))
 	}
@@ -17172,6 +17319,15 @@ func extractUserID(sessionKey string) string {
 	return ""
 }
 
+func stringSliceContains(ss []string, target string) bool {
+	for _, s := range ss {
+		if s == target {
+			return true
+		}
+	}
+	return false
+}
+
 func extractPlatformName(sessionKey string) string {
 	if i := strings.IndexByte(sessionKey, ':'); i >= 0 {
 		return sessionKey[:i]
@@ -17367,6 +17523,8 @@ func (e *Engine) workspaceFromLiveState(sessionKey string) string {
 	return ""
 }
 
+// interactiveKeyForSessionKey returns the interactive state key for a sessionKey.
+// In multi-workspace mode, it prefixes with the bound workspace path when available.
 func (e *Engine) interactiveKeyForSessionKey(sessionKey string) string {
 	if workspace := e.sendWorkDirForSession(sessionKey); workspace != "" {
 		return workspace + ":" + sessionKey
@@ -17422,6 +17580,47 @@ func (e *Engine) interactiveKeyForSessionKeyLocked(sessionKey string) string {
 		return found
 	}
 	return sessionKey
+}
+
+// findInteractiveKeyForSession scans the live interactiveStates map for an
+// interactive key that matches sessionKey, either as the key itself or as
+// the trailing "<workspace>:<sessionKey>" segment. Returns "" when no live
+// state references this sessionKey. Acquires e.interactiveMu internally;
+// callers that already hold the lock must use findInteractiveKeyInStatesLocked.
+//
+// The scan is bounded by the number of in-flight interactive sessions
+// (typically <10), so the linear cost is negligible compared to even one
+// binding lookup. Avoiding a parallel sessionKey→interactiveKey map keeps
+// the engine's state surface single-source-of-truth.
+func (e *Engine) findInteractiveKeyForSession(sessionKey string) string {
+	e.interactiveMu.Lock()
+	defer e.interactiveMu.Unlock()
+	return findInteractiveKeyInStatesLocked(e.interactiveStates, sessionKey)
+}
+
+// findInteractiveKeyInStatesLocked is the lock-free body of the scan; it
+// assumes the caller holds e.interactiveMu.
+//
+// Precedence is exact match first, then suffix scan. The exact path matters
+// because Go map iteration order is randomized: if both `sessionKey` and
+// `<workspace>:<sessionKey>` are live (e.g. a raw placeholder created before
+// multi-workspace was enabled coexisting with a workspace-prefixed turn),
+// a pure scan could non-deterministically return either, sending /stop or
+// pending-permission handling at the wrong state.
+func findInteractiveKeyInStatesLocked(states map[string]*interactiveState, sessionKey string) string {
+	if sessionKey == "" {
+		return ""
+	}
+	if _, ok := states[sessionKey]; ok {
+		return sessionKey
+	}
+	suffix := ":" + sessionKey
+	for k := range states {
+		if strings.HasSuffix(k, suffix) {
+			return k
+		}
+	}
+	return ""
 }
 
 // lookupEffectiveWorkspaceBinding returns the effective binding for a channel
@@ -17708,7 +17907,7 @@ func resolveLocalDirPath(target, baseDir string) (string, error) {
 
 // looksLikeLocalDir returns true if the string looks like a local directory
 // path (absolute path, home-relative, dot-relative, or a bare name that
-// doesn't look like a URL).
+// doesn't look like a URL). Slash commands like /dir are not local dirs.
 func looksLikeLocalDir(s string) bool {
 	if s == "" {
 		return false
@@ -17944,6 +18143,11 @@ func couldBeSilentPrefix(text string) bool {
 	return strings.HasPrefix("NO_REPLY", strings.ToUpper(t))
 }
 
+func isEllipsisOnly(text string) bool {
+	t := strings.TrimSpace(text)
+	return t == "..." || t == "…"
+}
+
 // parseSelfReportedCtx extracts the percentage from a self-reported "[ctx: ~XX%]" line.
 func parseSelfReportedCtx(s string) int {
 	m := ctxSelfReportRe.FindString(s)
@@ -18049,261 +18253,4 @@ func restoreActiveProviderFromSession(agent Agent, session *Session) {
 	}
 	slog.Info("restored active provider from session",
 		"session_id", session.ID, "provider", want)
-}
-
-// InstantReplyCfg controls the immediate confirmation reply sent when a message
-// is received, before the agent starts processing.
-type InstantReplyCfg struct {
-	Enabled bool
-	Content string // custom reply text; empty = use i18n MsgStarting default
-}
-
-// cardToolEntry stores a tool call record for card content rendering.
-type cardToolEntry struct {
-	Index int
-	Name  string
-	Input string
-}
-
-func (e *Engine) finishCronShell(p Platform, replyCtx any, cmd *exec.Cmd, mu *sync.Mutex, buf *bytes.Buffer, cmdLabel string, opts ...any) error {
-	mu.Lock()
-	output := buf.String()
-	mu.Unlock()
-
-	exitOK := cmd.ProcessState.ExitCode() == 0
-
-	var finalMsg string
-	if exitOK {
-		result := strings.TrimSpace(output)
-		if result == "" {
-			result = "(no output)"
-		}
-		finalMsg = fmt.Sprintf("⏰ ✅ `%s`\n\n%s", cmdLabel, truncateStr(result, 3000))
-	} else {
-		errMsg := output
-		if errMsg != "" {
-			finalMsg = fmt.Sprintf("⏰ ❌ `%s`\n\n%s\n\nerror: exit code %d", cmdLabel, truncateStr(errMsg, 3000), cmd.ProcessState.ExitCode())
-		} else {
-			finalMsg = fmt.Sprintf("⏰ ❌ `%s`\n\nerror: exit code %d", cmdLabel, cmd.ProcessState.ExitCode())
-		}
-	}
-
-	if len(opts) >= 2 {
-		if useUpdate, ok := opts[0].(bool); ok && useUpdate {
-			if handle := opts[1]; handle != nil {
-				_ = updaterFor(p).UpdateMessage(e.ctx, handle, finalMsg)
-				if !exitOK {
-					return fmt.Errorf("shell: exit code %d", cmd.ProcessState.ExitCode())
-				}
-				return nil
-			}
-		}
-	}
-
-	e.send(p, replyCtx, finalMsg)
-	if !exitOK {
-		return fmt.Errorf("shell: exit code %d", cmd.ProcessState.ExitCode())
-	}
-	return nil
-}
-
-// DefaultWorkspaceIdleTimeout is the default time a workspace can be idle
-// before the reaper reclaims it.
-const DefaultWorkspaceIdleTimeout = 15 * time.Minute
-
-func isEllipsisOnly(text string) bool {
-	t := strings.TrimSpace(text)
-	return t == "..." || t == "…"
-}
-
-func mergeRichToolResult(steps []ToolStep, event Event, result string, maxLen int) []ToolStep {
-	toolName := strings.TrimSpace(event.ToolName)
-	if toolName == "" {
-		toolName = "Tool"
-	}
-
-	idx := -1
-	for i := len(steps) - 1; i >= 0; i-- {
-		if steps[i].Kind == ToolStepKindThinking {
-			continue
-		}
-		if strings.TrimSpace(steps[i].Name) == "" || strings.TrimSpace(steps[i].Name) == toolName {
-			idx = i
-			break
-		}
-	}
-	if idx == -1 {
-		summary := strings.TrimSpace(event.ToolInput)
-		if summary != "" {
-			summary = truncateIf(summary, maxLen)
-		}
-		steps = append(steps, ToolStep{
-			Kind:    ToolStepKindTool,
-			Name:    toolName,
-			Summary: summary,
-		})
-		idx = len(steps) - 1
-	}
-
-	if strings.TrimSpace(steps[idx].Name) == "" {
-		steps[idx].Name = toolName
-	}
-	if steps[idx].Kind == "" {
-		steps[idx].Kind = ToolStepKindTool
-	}
-	if strings.TrimSpace(steps[idx].Summary) == "" && strings.TrimSpace(event.ToolInput) != "" {
-		steps[idx].Summary = truncateIf(strings.TrimSpace(event.ToolInput), maxLen)
-	}
-	steps[idx].Result = result
-	steps[idx].Status = strings.TrimSpace(event.ToolStatus)
-	steps[idx].ExitCode = event.ToolExitCode
-	steps[idx].Success = event.ToolSuccess
-	steps[idx].Done = true
-	return steps
-}
-
-// findInteractiveKeyInStatesLocked is the lock-free body of the scan; it
-// assumes the caller holds e.interactiveMu.
-//
-// Precedence is exact match first, then suffix scan. The exact path matters
-// because Go map iteration order is randomized: if both `sessionKey` and
-// `<workspace>:<sessionKey>` are live (e.g. a raw placeholder created before
-// multi-workspace was enabled coexisting with a workspace-prefixed turn),
-// a pure scan could non-deterministically return either, sending /stop or
-// pending-permission handling at the wrong state.
-func findInteractiveKeyInStatesLocked(states map[string]*interactiveState, sessionKey string) string {
-	if sessionKey == "" {
-		return ""
-	}
-	if _, ok := states[sessionKey]; ok {
-		return sessionKey
-	}
-	suffix := ":" + sessionKey
-	for k := range states {
-		if strings.HasSuffix(k, suffix) {
-			return k
-		}
-	}
-	return ""
-}
-
-// findInteractiveKeyForSession scans the live interactiveStates map for an
-// interactive key that matches sessionKey, either as the key itself or as
-// the trailing "<workspace>:<sessionKey>" segment. Returns "" when no live
-// state references this sessionKey. Acquires e.interactiveMu internally;
-// callers that already hold the lock must use findInteractiveKeyInStatesLocked.
-//
-// The scan is bounded by the number of in-flight interactive sessions
-// (typically <10), so the linear cost is negligible compared to even one
-// binding lookup. Avoiding a parallel sessionKey→interactiveKey map keeps
-// the engine's state surface single-source-of-truth.
-func (e *Engine) findInteractiveKeyForSession(sessionKey string) string {
-	e.interactiveMu.Lock()
-	defer e.interactiveMu.Unlock()
-	return findInteractiveKeyInStatesLocked(e.interactiveStates, sessionKey)
-}
-
-// cmdStart handles the `/start` slash command.
-//
-// On Telegram, `/start` is a protocol convention sent by the client when a
-// user first opens a bot (or taps the Start button). Without a native
-// handler, the message previously fell through to the default branch and
-// got forwarded verbatim to the agent — and Claude Code's CLI interprets a
-// leading "/" as a slash-command request, replying "Unknown command:
-// /start. Did you mean /stats?" instead of greeting the user.
-//
-// Replying with a localized welcome that names the project keeps the
-// behavior consistent with every other Telegram bot framework, and is a
-// no-op improvement on platforms where /start has no special meaning.
-func (e *Engine) cmdStart(p Platform, msg *Message) {
-	name := e.name
-	if name == "" {
-		name = e.agent.Name()
-	}
-	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgWelcome), name))
-}
-
-func (e *Engine) currentSessionDisplayName(agent Agent, sessions *SessionManager, agentID string) string {
-	if agentID == "" || agentID == e.i18n.T(MsgSessionNotStarted) {
-		return e.i18n.T(MsgUntitled)
-	}
-	displayName := sessions.GetSessionName(agentID)
-	if displayName != "" {
-		return displayName
-	}
-	agentSessions, err := agent.ListSessions(e.ctx)
-	if err == nil {
-		for _, as := range agentSessions {
-			if as.ID == agentID {
-				displayName = strings.ReplaceAll(as.Summary, "\n", " ")
-				displayName = strings.Join(strings.Fields(displayName), " ")
-				break
-			}
-		}
-	}
-	if displayName == "" {
-		if tp, ok := agent.(SessionTitleProvider); ok {
-			displayName = tp.GetSessionTitle(agentID)
-		}
-	}
-	if displayName == "" {
-		return e.i18n.T(MsgUntitled)
-	}
-	return displayName
-}
-
-func (e *Engine) SetDataDir(dir string) {
-	e.dataDir = dir
-}
-
-// SetInstantReply configures the immediate confirmation reply.
-func (e *Engine) SetInstantReply(cfg InstantReplyCfg) {
-	e.instantReply = cfg
-}
-
-// SetWorkspaceIdleTimeout overrides the workspace idle reaper timeout.
-// Must be called after SetMultiWorkspace. A zero value disables reaping.
-func (e *Engine) SetWorkspaceIdleTimeout(d time.Duration) {
-	if e.workspacePool != nil {
-		e.workspacePool.mu.Lock()
-		e.workspacePool.idleTimeout = d
-		e.workspacePool.mu.Unlock()
-	}
-}
-
-// SetWorkspaceInitAllowLocalPaths controls whether workspace init accepts
-// existing local directories as targets. When false, init remains git-URL only.
-func (e *Engine) SetWorkspaceInitAllowLocalPaths(allow bool) {
-	e.workspaceInitAllowLocalPaths = allow
-}
-
-func appendFinalMetadataToSegment(segment, fullResponse string) string {
-	segment = strings.TrimRight(segment, "\n ")
-	if segment == "" {
-		return fullResponse
-	}
-	fullResponse = strings.TrimSpace(fullResponse)
-	if fullResponse == "" || strings.TrimSpace(segment) == fullResponse {
-		return segment
-	}
-
-	metadata := ""
-	if idx := strings.LastIndex(fullResponse, "\n\n*"); idx >= 0 && strings.HasSuffix(fullResponse, "*") {
-		metadata = fullResponse[idx:]
-	} else if match := ctxSelfReportRe.FindString(fullResponse); match != "" {
-		metadata = "\n" + strings.TrimSpace(match)
-	}
-	if metadata == "" || strings.Contains(segment, strings.TrimSpace(metadata)) {
-		return segment
-	}
-	return segment + metadata
-}
-
-func stringSliceContains(ss []string, target string) bool {
-	for _, s := range ss {
-		if s == target {
-			return true
-		}
-	}
-	return false
 }

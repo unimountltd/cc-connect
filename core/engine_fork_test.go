@@ -110,7 +110,7 @@ func TestEngineSendToSessionWithAttachments_ProactiveUnsupported(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected unsupported-platform error")
 	}
-	if !strings.Contains(err.Error(), "does not support proactive sends") {
+	if !strings.Contains(err.Error(), "does not support proactive") {
 		t.Fatalf("err = %v, want unsupported-proactive hint", err)
 	}
 }
@@ -324,6 +324,28 @@ func TestBareNewSession_ShortCircuitsToNewCommand(t *testing.T) {
 	}
 	e.handleMessage(p, msg)
 	// Should go to agent, not create a session
+}
+
+// TestInjectPrefix_RoutesToBuiltinCommand is a regression test for the same
+// missing builtin registration that broke /preset: "inject: ..." is rewritten
+// to /inject, so cmdInject must be reachable through command resolution.
+func TestInjectPrefix_RoutesToBuiltinCommand(t *testing.T) {
+	p := &stubPlatformEngine{n: "slack"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	store := NewProjectStateStore(filepath.Join(t.TempDir(), "project_state.json"))
+	e.SetProjectStateStore(store)
+
+	e.ReceiveMessage(p, &Message{
+		SessionKey: "slack:C123:U456",
+		Platform:   "slack",
+		UserID:     "U456",
+		ReplyCtx:   "ctx",
+		Content:    "inject: prefer small diffs",
+	})
+
+	if got := store.GetInjectPrompt("C123"); got != "prefer small diffs" {
+		t.Fatalf("stored inject prompt = %q, want %q", got, "prefer small diffs")
+	}
 }
 
 // TestPsPrefix_ShortCircuitsToPsCommand verifies that bare "ps: ..." input

@@ -94,6 +94,27 @@ type recallCheckingPlatform struct {
 	checked  []any
 }
 
+// TestStartCommand_RoutesThroughReceiveMessage pins upstream's intended
+// Telegram /start behavior. The handler already existed upstream but was not
+// registered in builtinCommands, so it could otherwise fall through to the
+// coding agent as an unknown slash command.
+func TestStartCommand_RoutesThroughReceiveMessage(t *testing.T) {
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("demo", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	e.ReceiveMessage(p, &Message{
+		SessionKey: "telegram:chat:user1",
+		Platform:   "telegram",
+		UserID:     "user1",
+		ReplyCtx:   "ctx",
+		Content:    "/start",
+	})
+
+	if sent := p.getSent(); len(sent) != 1 || sent[0] != e.i18n.Tf(MsgWelcome, "demo") {
+		t.Fatalf("/start reply = %v, want localized welcome", sent)
+	}
+}
+
 func (p *recallCheckingPlatform) IsMessageRecalled(_ context.Context, replyCtx any) (bool, error) {
 	p.mu.Lock()
 	p.checked = append(p.checked, replyCtx)
@@ -14480,6 +14501,59 @@ func TestEventsNeedResync_ClearedOnCleanResult(t *testing.T) {
 
 	if resync {
 		t.Error("expected eventsNeedResync to be false after clean EventResult")
+	}
+}
+
+// TestProcessInteractiveMessage_FirstAttemptPreservesCleanBufferedEvent is a
+// regression test for the retry loop draining the event channel even when the
+// preceding turn ended cleanly. Upstream deliberately preserves that buffer
+// unless eventsNeedResync is set; only retry attempts may discard leftovers.
+func TestProcessInteractiveMessage_FirstAttemptPreservesCleanBufferedEvent(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newControllableSession("preserved-buffer")
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+	e.eventIdleTimeout = 25 * time.Millisecond
+	defer e.Stop()
+
+	const key = "test:clean-buffer:user1"
+	session := e.sessions.GetOrCreateActive(key)
+	session.SetAgentSessionID("preserved-buffer", agent.Name())
+	if !session.TryLock() {
+		t.Fatal("expected session lock")
+	}
+	state := &interactiveState{
+		agentSession:     sess,
+		platform:         p,
+		replyCtx:         "ctx",
+		agent:            agent,
+		eventsNeedResync: false,
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	sess.events <- Event{Type: EventResult, Content: "preserved result", Done: true}
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveMessageWith(p, &Message{
+			Platform:   "test",
+			SessionKey: key,
+			UserID:     "user1",
+			Content:    "next turn",
+			ReplyCtx:   "ctx",
+		}, session, agent, e.sessions, key, "", key)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("processInteractiveMessageWith did not complete")
+	}
+
+	if got := strings.Join(p.getSent(), "\n"); !strings.Contains(got, "preserved result") {
+		t.Fatalf("clean buffered result was discarded; sent=%q", got)
 	}
 }
 

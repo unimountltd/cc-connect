@@ -235,6 +235,31 @@ func TestRestartKeepsUserDomainWhenGUIDomainUnavailable(t *testing.T) {
 	}
 }
 
+// collectXMLText walks the XML stream and returns every chardata text node.
+// Used by the plist-escape test to verify path values round-trip through
+// xml.Decoder regardless of how deeply they are nested.
+func collectXMLText(t *testing.T, data []byte) []string {
+	t.Helper()
+	dec := xml.NewDecoder(strings.NewReader(string(data)))
+	var out []string
+	for {
+		tok, err := dec.Token()
+		if tok == nil {
+			break
+		}
+		if err != nil {
+			t.Fatalf("xml decode token: %v", err)
+		}
+		if cd, ok := tok.(xml.CharData); ok {
+			s := strings.TrimSpace(string(cd))
+			if s != "" {
+				out = append(out, s)
+			}
+		}
+	}
+	return out
+}
+
 func containsCall(calls []string, want string) bool {
 	for _, call := range calls {
 		if call == want {
@@ -477,29 +502,4 @@ func TestInstallLaunchd_TightensExistingPlistFrom0644(t *testing.T) {
 	if info.Mode().Perm() != 0o600 {
 		t.Errorf("plist mode after reinstall = %o, want 0600", info.Mode().Perm())
 	}
-}
-
-// collectXMLText walks the XML stream and returns every chardata text node.
-// Used by the plist-escape test to verify path values round-trip through
-// xml.Decoder regardless of how deeply they are nested.
-func collectXMLText(t *testing.T, data []byte) []string {
-	t.Helper()
-	dec := xml.NewDecoder(strings.NewReader(string(data)))
-	var out []string
-	for {
-		tok, err := dec.Token()
-		if tok == nil {
-			break
-		}
-		if err != nil {
-			t.Fatalf("xml decode token: %v", err)
-		}
-		if cd, ok := tok.(xml.CharData); ok {
-			s := strings.TrimSpace(string(cd))
-			if s != "" {
-				out = append(out, s)
-			}
-		}
-	}
-	return out
 }
