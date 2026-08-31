@@ -228,9 +228,16 @@ var topLevelCommandHandlers = map[string]func([]string){
 	"yuanbao":   runYuanbao,
 	"doctor":    runDoctor,
 	"web":       runWeb,
-	// Fork-only: PostHog usage telemetry (see docs/fork-features.md).
+	// Fork-only commands (see docs/fork-features.md). These must stay
+	// registered here: upstream rejects unknown top-level commands, so a
+	// merge that takes this map wholesale silently breaks them.
 	"usage":     runUsage,
 	"dashboard": runDashboard,
+	// `version` as a real subcommand, so it prints and exits instead of
+	// falling through to a full daemon start.
+	"version": func(_ []string) {
+		fmt.Printf("cc-connect %s\ncommit:  %s\nbuilt:   %s\n", version, commit, buildTime)
+	},
 }
 
 func main() {

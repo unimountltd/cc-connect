@@ -254,11 +254,20 @@ Recorded so nobody re-adds the fork's version on a future merge.
 
 ### Merge hazard
 
-- **`/next` must stay in `builtinCommands`.** `/next` is fork-only. Taking
-  upstream's command list wholesale silently drops it and the command stops
-  resolving — the dispatch `case "next"` alone is not enough, since `cmdID` is
-  resolved from `builtinCommands` first. Same trap applies to any future
-  fork-only command.
+Upstream now rejects unknown commands rather than falling through, so a merge
+that takes one of its command tables wholesale turns a fork-only command into a
+hard error. Two tables must be re-checked on every merge:
+
+- **`/next` in `core/engine.go`'s `builtinCommands`.** `cmdID` is resolved from
+  that list first, so the dispatch `case "next"` alone is not enough — drop the
+  entry and `/next` silently stops resolving.
+
+- **`version`, `usage` and `dashboard` in `cmd/cc-connect/main.go`'s
+  `topLevelCommandHandlers`.** `version` in particular is a fork subcommand
+  (`77a719d4`) so `cc-connect version` prints and exits instead of starting a
+  full daemon; upstream only has the `--version` flag.
+
+Both are smoke-testable: `cc-connect version` and a `/next` round-trip.
 
 ### Deliberate divergences kept
 
