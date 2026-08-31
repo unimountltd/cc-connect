@@ -14514,7 +14514,7 @@ func TestProcessInteractiveMessage_FirstAttemptPreservesCleanBufferedEvent(t *te
 	agent := &controllableAgent{nextSession: sess}
 	e := NewEngine("test", agent, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
 	e.eventIdleTimeout = 25 * time.Millisecond
-	defer e.Stop()
+	defer func() { _ = e.Stop() }()
 
 	const key = "test:clean-buffer:user1"
 	session := e.sessions.GetOrCreateActive(key)

@@ -8414,28 +8414,6 @@ func appendReplyFooter(content, footer string) string {
 	return content + "\n\n*" + footer + "*"
 }
 
-func appendFinalMetadataToSegment(segment, fullResponse string) string {
-	segment = strings.TrimRight(segment, "\n ")
-	if segment == "" {
-		return fullResponse
-	}
-	fullResponse = strings.TrimSpace(fullResponse)
-	if fullResponse == "" || strings.TrimSpace(segment) == fullResponse {
-		return segment
-	}
-
-	metadata := ""
-	if idx := strings.LastIndex(fullResponse, "\n\n*"); idx >= 0 && strings.HasSuffix(fullResponse, "*") {
-		metadata = fullResponse[idx:]
-	} else if match := ctxSelfReportRe.FindString(fullResponse); match != "" {
-		metadata = "\n" + strings.TrimSpace(match)
-	}
-	if metadata == "" || strings.Contains(segment, strings.TrimSpace(metadata)) {
-		return segment
-	}
-	return segment + metadata
-}
-
 func (e *Engine) cmdShow(p Platform, msg *Message, args []string) {
 	rawRef := strings.TrimSpace(strings.Join(args, " "))
 	if rawRef == "" {
@@ -17317,15 +17295,6 @@ func extractUserID(sessionKey string) string {
 		return parts[2]
 	}
 	return ""
-}
-
-func stringSliceContains(ss []string, target string) bool {
-	for _, s := range ss {
-		if s == target {
-			return true
-		}
-	}
-	return false
 }
 
 func extractPlatformName(sessionKey string) string {
