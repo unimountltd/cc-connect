@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -30,6 +31,167 @@ var (
 	buildTime = "unknown"
 )
 
+// globalAPIServer holds the running API server so the config-reload path can
+// re-apply hot-reloadable settings (e.g. max attachment size) without threading
+// it through the engine's reload closure. nil when the API server is disabled.
+var globalAPIServer *core.APIServer
+
+// defaultResetOnIdleMins is applied when a project does not set
+// reset_on_idle_mins. After this many minutes of user inactivity, cc-connect
+// rotates to a fresh session for the next message instead of resuming the
+// previous transcript via --continue. This avoids "context drift" where stale
+// chat history (failed commands, debugging noise, abandoned tangents) is
+// repeatedly re-ingested and starts to dominate the model's attention. The
+// previous session is preserved and remains accessible via /list and /switch.
+//
+// Set reset_on_idle_mins = 0 in config.toml to opt out and restore the
+// previous behavior of always continuing the prior session.
+const defaultResetOnIdleMins = 0
+
+// resolveResetOnIdle returns the configured reset-on-idle duration for a
+// project, applying defaultResetOnIdleMins when the field is unset. The second
+// return value indicates whether the default was applied, so the caller can
+// emit a one-time nudge log directing users to the docs.
+func resolveResetOnIdle(configured *int) (time.Duration, bool) {
+	if configured != nil {
+		return time.Duration(*configured) * time.Minute, false
+	}
+	return time.Duration(defaultResetOnIdleMins) * time.Minute, true
+}
+
+// logSizeSource describes where the resolved log size came from, so the
+// caller can log it and operators can audit the active setting without
+// grepping systemd/launchd definitions.
+type logSizeSource string
+
+const (
+	logSizeSourceFlag    logSizeSource = "flag"
+	logSizeSourceEnv     logSizeSource = "env"
+	logSizeSourceDefault logSizeSource = "default"
+)
+
+// resolveLogMaxSize picks the effective max log size in bytes, applying the
+// priority order: explicit flag value > CC_LOG_MAX_SIZE env var > built-in
+// default. flagValue is the raw string from --log-max-size ("" if not set).
+// Returns the byte count and which source won. Invalid flag/env values are
+// logged to stderr and the value is ignored — a malformed setting must never
+// silently downgrade to "0 bytes" or another surprise.
+func resolveLogMaxSize(flagValue string) (int64, logSizeSource) {
+	if strings.TrimSpace(flagValue) != "" {
+		n, err := daemon.ParseLogSize(flagValue)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: ignoring --log-max-size=%q: %v\n", flagValue, err)
+		} else {
+			return n, logSizeSourceFlag
+		}
+	}
+	if v := os.Getenv("CC_LOG_MAX_SIZE"); v != "" {
+		n, err := daemon.ParseLogSize(v)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: ignoring CC_LOG_MAX_SIZE=%q: %v\n", v, err)
+		} else {
+			return n, logSizeSourceEnv
+		}
+	}
+	return int64(daemon.DefaultLogMaxSize), logSizeSourceDefault
+}
+
+// preScanLogMaxSizeFlag returns the value passed via --log-max-size before
+// flag.Parse() runs, so the rotating-writer setup can honour the flag too.
+// Returns "" if the flag is absent. Both "--log-max-size VALUE" and
+// "--log-max-size=VALUE" forms are recognised.
+func preScanLogMaxSizeFlag(args []string) string {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--log-max-size" {
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+			return ""
+		}
+		if strings.HasPrefix(a, "--log-max-size=") {
+			return strings.TrimPrefix(a, "--log-max-size=")
+		}
+	}
+	return ""
+}
+
+// logBackupsSource describes where the resolved max-backups count came
+// from, mirroring logSizeSource so operators can audit the active value
+// from the startup log line alone.
+type logBackupsSource string
+
+const (
+	logBackupsSourceFlag    logBackupsSource = "flag"
+	logBackupsSourceEnv     logBackupsSource = "env"
+	logBackupsSourceDefault logBackupsSource = "default"
+)
+
+// resolveLogMaxBackups picks the effective number of rotated log backups
+// to retain, with the same priority order as resolveLogMaxSize: explicit
+// flag value > CC_LOG_MAX_BACKUPS env var > built-in default. Returns
+// the count and which source won. Invalid inputs are logged to stderr
+// and the value is ignored so a typo never silently downgrades to "0".
+func resolveLogMaxBackups(flagValue string) (int, logBackupsSource) {
+	if strings.TrimSpace(flagValue) != "" {
+		n, err := daemon.ParseLogBackups(flagValue)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: ignoring --log-max-backups=%q: %v\n", flagValue, err)
+		} else {
+			return n, logBackupsSourceFlag
+		}
+	}
+	if v := os.Getenv("CC_LOG_MAX_BACKUPS"); v != "" {
+		n, err := daemon.ParseLogBackups(v)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: ignoring CC_LOG_MAX_BACKUPS=%q: %v\n", v, err)
+		} else {
+			return n, logBackupsSourceEnv
+		}
+	}
+	return daemon.DefaultLogMaxBackups, logBackupsSourceDefault
+}
+
+// preScanLogMaxBackupsFlag returns the value passed via --log-max-backups
+// before flag.Parse() runs, mirroring preScanLogMaxSizeFlag. Returns ""
+// if the flag is absent.
+func preScanLogMaxBackupsFlag(args []string) string {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--log-max-backups" {
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+			return ""
+		}
+		if strings.HasPrefix(a, "--log-max-backups=") {
+			return strings.TrimPrefix(a, "--log-max-backups=")
+		}
+	}
+	return ""
+}
+
+// resolveMaxAttachmentSize returns the per-attachment size limit in bytes for
+// the /send API. Priority: CC_MAX_ATTACHMENT_SIZE_MB env var (MiB) >
+// config max_attachment_size_mb > core.DefaultMaxAttachmentSize. The env var
+// intentionally uses the same MiB unit as the config field so the two knobs
+// cannot silently disagree by a factor of 1<<20. A malformed or non-positive
+// env value is ignored (falling through to config/default) rather than being
+// fatal — the same lenient posture as resolveLogMaxSize, which also warns so
+// a typo never silently downgrades the setting.
+func resolveMaxAttachmentSize(cfg *config.Config) int64 {
+	if v := strings.TrimSpace(os.Getenv("CC_MAX_ATTACHMENT_SIZE_MB")); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			return n << 20
+		}
+		fmt.Fprintf(os.Stderr, "warning: ignoring CC_MAX_ATTACHMENT_SIZE_MB=%q: must be a positive integer (MiB)\n", v)
+	}
+	if cfg != nil && cfg.MaxAttachmentSizeMB > 0 {
+		return int64(cfg.MaxAttachmentSizeMB) << 20
+	}
+	return core.DefaultMaxAttachmentSize
+}
+
 type initialModelRefreshStarter interface {
 	StartInitialModelRefresh()
 }
@@ -40,80 +202,58 @@ type providerWiringResult struct {
 	canStartInitialRefresh    bool
 }
 
-func main() {
-	checkUpdateAsync()
+var topLevelCommandHandlers = map[string]func([]string){
+	"config-example": func(_ []string) {
+		fmt.Print(ccconnect.ConfigExampleTOML)
+	},
+	"config": runConfig,
+	"update": func(_ []string) {
+		runUpdate()
+	},
+	"check-update": func(_ []string) {
+		checkUpdate()
+	},
+	"provider":  runProviderCommand,
+	"send":      runSend,
+	"cron":      runCron,
+	"timer":     runTimer,
+	"at":        runTimer,
+	"relay":     runRelay,
+	"sessions":  runSessions,
+	"agent-sid": runAgentSID,
+	"daemon":    runDaemon,
+	"feishu":    runFeishu,
+	"tuitui":    runTuiTui,
+	"weixin":    runWeixin,
+	"yuanbao":   runYuanbao,
+	"doctor":    runDoctor,
+	"web":       runWeb,
+	// Fork-only: PostHog usage telemetry (see docs/fork-features.md).
+	"usage":     runUsage,
+	"dashboard": runDashboard,
+}
 
-	// Handle subcommands before flag parsing
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "version", "-v", "--version":
-			fmt.Printf("cc-connect %s\ncommit:  %s\nbuilt:   %s\n", version, commit, buildTime)
-			return
-		case "config-example":
-			fmt.Print(ccconnect.ConfigExampleTOML)
-			return
-		case "config":
-			runConfig(os.Args[2:])
-			return
-		case "update":
-			runUpdate()
-			return
-		case "check-update":
-			checkUpdate()
-			return
-		case "provider":
-			runProviderCommand(os.Args[2:])
-			return
-		case "send":
-			runSend(os.Args[2:])
-			return
-		case "cron":
-			runCron(os.Args[2:])
-			return
-		case "relay":
-			runRelay(os.Args[2:])
-			return
-		case "sessions":
-			runSessions(os.Args[2:])
-			return
-		case "agent-sid":
-			runAgentSID(os.Args[2:])
-			return
-		case "daemon":
-			runDaemon(os.Args[2:])
-			return
-		case "feishu":
-			runFeishu(os.Args[2:])
-			return
-		case "weixin":
-			runWeixin(os.Args[2:])
-			return
-		case "doctor":
-			runDoctor(os.Args[2:])
-			return
-		case "usage":
-			runUsage(os.Args[2:])
-			return
-		case "dashboard":
-			runDashboard(os.Args[2:])
-			return
-		case "web":
-			runWeb(os.Args[2:])
-			return
-		}
+func main() {
+	// Agy hooks require stdout to contain only the final JSON decision. Handle
+	// this internal command before update checks, logging, or normal CLI setup.
+	if len(os.Args) > 1 && os.Args[1] == "_agy-permission-hook" {
+		runAntigravityPermissionHook()
+		return
 	}
 
+	checkUpdateAsync()
 	// When started as a daemon (CC_LOG_FILE set), redirect logs to a rotating file.
+	// Log file setup happens before flag.Parse() so the rotating writer is in
+	// place before any slog output. To still honour --log-max-size, we
+	// pre-scan os.Args here for the flag value; this is a small, deliberate
+	// duplication of flag parsing for one well-known key.
 	var logWriter io.Writer
 	var logCloser io.Closer
 	if logFile := os.Getenv("CC_LOG_FILE"); logFile != "" {
-		maxSize := int64(daemon.DefaultLogMaxSize)
-		if v := os.Getenv("CC_LOG_MAX_SIZE"); v != "" {
-			if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
-				maxSize = n
-			}
-		}
-		w, err := daemon.NewRotatingWriter(logFile, maxSize)
+		maxSize, maxSizeSrc := resolveLogMaxSize(preScanLogMaxSizeFlag(os.Args[1:]))
+		maxBackups, maxBackupsSrc := resolveLogMaxBackups(preScanLogMaxBackupsFlag(os.Args[1:]))
+		fmt.Fprintf(os.Stderr, "log: redirecting to %s with max_size=%d bytes (source: %s), max_backups=%d (source: %s)\n", logFile, maxSize, maxSizeSrc, maxBackups, maxBackupsSrc)
+		w, err := daemon.NewRotatingWriter(logFile, maxSize, maxBackups)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "failed to open log file %s: %v\n", logFile, err)
 			os.Exit(1)
@@ -123,17 +263,39 @@ func main() {
 		slog.SetDefault(slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	}
 
-	configFlag := flag.String("config", "", "path to config file (default: ./config.toml or ~/.cc-connect/config.toml)")
-	showVersion := flag.Bool("version", false, "print version and exit")
-	observeFlag := flag.Bool("observe", false, "observe native terminal Claude Code sessions and forward to Slack")
-	observeChannel := flag.String("observe-channel", "", "Slack channel ID to forward terminal observations to (requires --observe)")
-	forceFlag := flag.Bool("force", false, "kill any existing instance with the same config before starting")
-	flag.Usage = printUsage
-	flag.Parse()
+	rootOpts, err := parseRootCLIOptions(os.Args[1:])
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return
+		}
+		os.Exit(2)
+	}
 
-	if *showVersion {
+	// Cross-check: the rotating-writer setup above consumed a pre-scanned
+	// value of --log-max-size. Validate the parsed value too so malformed
+	// values surface a clear warning.
+	if strings.TrimSpace(rootOpts.logMaxSize) != "" {
+		if _, err := daemon.ParseLogSize(rootOpts.logMaxSize); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: --log-max-size=%q: %v\n", rootOpts.logMaxSize, err)
+		}
+	}
+	if rootOpts.logMaxBackups < 0 {
+		fmt.Fprintf(os.Stderr, "warning: --log-max-backups=%d must be >= 0 (0 means use env/default)\n", rootOpts.logMaxBackups)
+	}
+
+	if rootOpts.showVersion {
 		fmt.Printf("cc-connect %s\ncommit:  %s\nbuilt:   %s\n", version, commit, buildTime)
 		return
+	}
+
+	if runTopLevelCommand(rootOpts.args) {
+		return
+	}
+
+	if err := validateNoExtraTopLevelArgs(rootOpts.args); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n\n", err)
+		printUsage()
+		os.Exit(1)
 	}
 
 	core.VersionInfo = fmt.Sprintf("cc-connect %s\ncommit: %s\nbuilt: %s", version, commit, buildTime)
@@ -141,10 +303,10 @@ func main() {
 	core.CurrentCommit = commit
 	core.CurrentBuildTime = buildTime
 
-	configPath := resolveConfigPath(*configFlag)
+	configPath := resolveConfigPath(rootOpts.configPath)
 
 	// Handle --force: kill any existing instance before we try to acquire the lock
-	if *forceFlag {
+	if rootOpts.force {
 		if KillExistingInstance(configPath) {
 			slog.Info("killed existing instance via --force")
 		}
@@ -255,8 +417,13 @@ func main() {
 		engine := core.NewEngine(proj.Name, agent, platforms, sessionFile, lang)
 		// Wire display settings including show_context_indicator and reply_footer
 		// Global [display] config can be overridden by project-level settings
-		_, _, _, _, _, showCtx, showFooter := config.EffectiveDisplay(cfg, &proj)
+		_, _, _, _, _, showCtx, showFooter, _ := config.EffectiveDisplay(cfg, &proj)
 		engine.SetShowContextIndicator(showCtx)
+		showWorkdir := true
+		if proj.ShowWorkdirIndicator != nil {
+			showWorkdir = *proj.ShowWorkdirIndicator
+		}
+		engine.SetShowWorkdirIndicator(showWorkdir)
 		engine.SetReplyFooterEnabled(showFooter)
 		engine.SetAttachmentSendEnabled(cfg.AttachmentSend != "off")
 		engine.SetFilterExternalSessions(proj.FilterExternalSessions != nil && *proj.FilterExternalSessions)
@@ -280,8 +447,8 @@ func main() {
 		}
 
 		// Wire terminal observation (--observe / [projects.observe])
-		observeEnabled := *observeFlag
-		obsChan := *observeChannel
+		observeEnabled := rootOpts.observe
+		obsChan := rootOpts.observeChannel
 		if proj.Observe != nil {
 			if !observeEnabled && proj.Observe.Enabled {
 				observeEnabled = true
@@ -359,14 +526,23 @@ func main() {
 
 		// Wire display truncation settings (includes legacy quiet → display mapping)
 		{
-			_, tm, tool, tmlen, toollen, _, _ := config.EffectiveDisplay(cfg, &proj)
+			mode, tm, tool, tmlen, toollen, _, _, hideAgentFooter := config.EffectiveDisplay(cfg, &proj)
+			historyMaxLen := config.EffectiveHistoryMaxLen(cfg, &proj)
 			engine.SetDisplayConfig(core.DisplayCfg{
+				Mode:             mode,
+				CardMode:         config.EffectiveCardMode(cfg, &proj),
 				ThinkingMessages: tm,
 				ThinkingMaxLen:   tmlen,
 				ToolMaxLen:       toollen,
 				ToolMessages:     tool,
+				HistoryMaxLen:    &historyMaxLen,
+				HideAgentFooter:  hideAgentFooter,
 			})
 		}
+
+		// Wire shell configuration
+		shell, shellFlag, shellProfile := config.EffectiveShell(cfg, &proj)
+		engine.SetShell(shell, shellFlag, shellProfile)
 
 		// Wire hooks
 		if len(cfg.Hooks) > 0 {
@@ -381,7 +557,7 @@ func main() {
 					Async:   h.Async,
 				}
 			}
-			engine.SetHooks(core.NewHookManager(proj.Name, coreHooks))
+			engine.SetHooks(core.NewHookManager(proj.Name, coreHooks, shell, shellFlag, shellProfile))
 		}
 
 		// Wire local reference normalization / rendering
@@ -459,8 +635,8 @@ func main() {
 			}
 		}
 
-		engine.SetDisplaySaveFunc(func(thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
-			return config.SaveDisplayConfig(nil, thinkingMessages, thinkingMaxLen, toolMaxLen, toolMessages)
+		engine.SetDisplaySaveFunc(func(mode *string, thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
+			return config.SaveDisplayConfig(mode, thinkingMessages, thinkingMaxLen, toolMaxLen, toolMessages)
 		})
 
 		// Wire idle timeout
@@ -471,6 +647,11 @@ func main() {
 			} else {
 				engine.SetEventIdleTimeout(time.Duration(mins) * time.Minute)
 			}
+		}
+
+		// Wire max turn time (absolute per-turn wall-clock cap; 0 = disabled)
+		if cfg.MaxTurnTimeMins != nil && *cfg.MaxTurnTimeMins > 0 {
+			engine.SetMaxTurnTime(time.Duration(*cfg.MaxTurnTimeMins) * time.Minute)
 		}
 
 		// Wire queue depth
@@ -492,6 +673,14 @@ func main() {
 		}
 		if proj.ResetOnIdleMins != nil {
 			engine.SetResetOnIdle(time.Duration(*proj.ResetOnIdleMins) * time.Minute)
+		}
+		if proj.AgentSessionIdleTimeoutMins != nil {
+			mins := *proj.AgentSessionIdleTimeoutMins
+			if mins <= 0 {
+				engine.SetAgentSessionIdleTimeout(0)
+			} else {
+				engine.SetAgentSessionIdleTimeout(time.Duration(mins) * time.Minute)
+			}
 		}
 
 		// Wire sender injection
@@ -551,13 +740,16 @@ func main() {
 		}
 
 		// Wire text-to-speech if enabled
-		if cfg.TTS.Enabled {
+		ttsEffective := config.ResolveTTSConfigForProject(cfg.TTS, proj.Name)
+		if ttsEffective.Enabled {
 			ttsCfg := &core.TTSCfg{
-				Enabled:    true,
-				Voice:      cfg.TTS.Voice,
-				MaxTextLen: cfg.TTS.MaxTextLen,
+				Enabled:      true,
+				Voice:        ttsEffective.Voice,
+				LanguageType: ttsEffective.LanguageType,
+				Speed:        ttsEffective.Speed,
+				MaxTextLen:   ttsEffective.MaxTextLen,
 			}
-			initMode := cfg.TTS.TTSMode
+			initMode := ttsEffective.TTSMode
 			switch initMode {
 			case "always", "voice_only":
 			case "":
@@ -567,7 +759,7 @@ func main() {
 				initMode = "voice_only"
 			}
 			ttsCfg.SetTTSMode(initMode)
-			switch cfg.TTS.Provider {
+			switch ttsEffective.Provider {
 			case "qwen":
 				apiKey := cfg.TTS.Qwen.APIKey
 				baseURL := cfg.TTS.Qwen.BaseURL
@@ -582,6 +774,21 @@ func main() {
 				apiKey := cfg.TTS.MiniMax.APIKey
 				baseURL := cfg.TTS.MiniMax.BaseURL
 				model := cfg.TTS.MiniMax.Model
+				if apiKey == "" {
+					localCfg, err := config.LoadMiniMaxLocalConfig(cfg.DataDir, cfg.TTS.MiniMax.ConfigFile)
+					if err != nil {
+						slog.Warn("tts: failed to load minimax local config", "error", err)
+					} else {
+						apiKey = localCfg.APIKey
+						if baseURL == "" {
+							if localCfg.BaseURL != "" {
+								baseURL = localCfg.BaseURL
+							} else if localCfg.APIHost != "" {
+								baseURL = localCfg.APIHost
+							}
+						}
+					}
+				}
 				if apiKey != "" {
 					ttsCfg.TTS = core.NewMiniMaxTTS(apiKey, baseURL, model, nil)
 					ttsCfg.Provider = "minimax"
@@ -599,21 +806,21 @@ func main() {
 					slog.Warn("tts: mimo provider enabled but api_key is empty")
 				}
 			case "espeak":
-				voice := cfg.TTS.Voice
+				voice := ttsEffective.Voice
 				if voice == "" {
 					voice = "zh" // default to Chinese
 				}
 				ttsCfg.TTS = core.NewEspeakTTS("", voice)
 				ttsCfg.Provider = "espeak"
 			case "pico":
-				voice := cfg.TTS.Voice
+				voice := ttsEffective.Voice
 				if voice == "" {
 					voice = "zh-CN" // default to Chinese (Simplified)
 				}
 				ttsCfg.TTS = core.NewPicoTTS("", voice)
 				ttsCfg.Provider = "pico"
 			case "edge":
-				voice := cfg.TTS.Voice
+				voice := ttsEffective.Voice
 				if voice == "" {
 					voice = "zh-CN-XiaoxiaoNeural" // default Chinese neural voice
 				}
@@ -751,6 +958,26 @@ func main() {
 		}
 	}
 
+	// Start timer scheduler
+	timerStore, err := core.NewTimerStore(cfg.DataDir)
+	if err != nil {
+		slog.Warn("timer store unavailable", "error", err)
+	}
+	var timerSched *core.TimerScheduler
+	if timerStore != nil {
+		timerSched = core.NewTimerScheduler(timerStore)
+		if cfg.Cron.Silent != nil && *cfg.Cron.Silent {
+			timerSched.SetDefaultSilent(true)
+		}
+		if cfg.Cron.SessionMode != "" {
+			timerSched.SetDefaultSessionMode(cfg.Cron.SessionMode)
+		}
+		for i, e := range engines {
+			timerSched.RegisterEngine(cfg.Projects[i].Name, e)
+			e.SetTimerScheduler(timerSched)
+		}
+	}
+
 	// Start heartbeat scheduler
 	heartbeatSched := core.NewHeartbeatScheduler(cfg.DataDir)
 	for i, proj := range cfg.Projects {
@@ -777,6 +1004,12 @@ func main() {
 	if cronSched != nil {
 		if err := cronSched.Start(); err != nil {
 			slog.Error("cron scheduler start failed", "error", err)
+		}
+	}
+
+	if timerSched != nil {
+		if err := timerSched.Start(); err != nil {
+			slog.Error("timer scheduler start failed", "error", err)
 		}
 	}
 
@@ -833,6 +1066,9 @@ func main() {
 		}
 		if cronSched != nil {
 			mgmtSrv.SetCronScheduler(cronSched)
+		}
+		if timerSched != nil {
+			mgmtSrv.SetTimerScheduler(timerSched)
 		}
 		mgmtSrv.SetHeartbeatScheduler(heartbeatSched)
 		if bridgeSrv != nil {
@@ -897,6 +1133,7 @@ func main() {
 				Mode:                 u.Mode,
 				AgentType:            u.AgentType,
 				ShowContextIndicator: u.ShowContextIndicator,
+				ShowWorkdirIndicator: u.ShowWorkdirIndicator,
 				ReplyFooter:          u.ReplyFooter,
 				InjectSender:         u.InjectSender,
 				PlatformAllowFrom:    u.PlatformAllowFrom,
@@ -986,6 +1223,9 @@ func main() {
 	if err != nil {
 		slog.Warn("api server unavailable", "error", err)
 	} else {
+		globalAPIServer = apiSrv
+		apiSrv.SetMaxAttachmentSize(resolveMaxAttachmentSize(cfg))
+
 		relayMgr := core.NewRelayManager(cfg.DataDir)
 		if cfg.Relay.TimeoutSecs != nil {
 			secs := *cfg.Relay.TimeoutSecs
@@ -995,6 +1235,7 @@ func main() {
 				relayMgr.SetTimeout(time.Duration(secs) * time.Second)
 			}
 		}
+		relayMgr.SetVisibility(cfg.Relay.Visibility)
 		apiSrv.SetRelayManager(relayMgr)
 
 		// Create shared DirHistory for all engines
@@ -1015,16 +1256,23 @@ func main() {
 		if cronSched != nil {
 			apiSrv.SetCronScheduler(cronSched)
 		}
+		if timerSched != nil {
+			apiSrv.SetTimerScheduler(timerSched)
+		}
 		apiSrv.Start()
 	}
 
 	slog.Info("cc-connect is running", "projects", len(engines))
 
-	// After startup, check if we were restarted and send success notification
+	// After startup, check if we were restarted and queue the success
+	// notification. The engine dispatches it on the first OnPlatformReady
+	// for the target platform (or with a 10s safety timeout), so async
+	// platforms that need 2-3s to actually connect (e.g. Telegram) do not
+	// silently drop the notify. See issue #1383.
 	if notify := core.ConsumeRestartNotify(cfg.DataDir); notify != nil {
-		slog.Info("post-restart: sending success notification", "platform", notify.Platform, "session", notify.SessionKey)
+		slog.Info("post-restart: queuing success notification", "platform", notify.Platform, "session", notify.SessionKey)
 		for _, e := range engines {
-			e.SendRestartNotification(notify.Platform, notify.SessionKey)
+			e.SetPendingRestartNotify(notify)
 		}
 	}
 
@@ -1050,6 +1298,9 @@ func main() {
 		webhookSrv.Stop()
 	}
 	heartbeatSched.Stop()
+	if timerSched != nil {
+		timerSched.Stop()
+	}
 	if cronSched != nil {
 		cronSched.Stop()
 	}
@@ -1104,6 +1355,65 @@ func main() {
 	}
 
 	slog.Info("bye")
+}
+
+func runTopLevelCommand(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	handler, ok := topLevelCommandHandlers[args[0]]
+	if !ok {
+		return false
+	}
+	handler(args[1:])
+	return true
+}
+
+type rootCLIOptions struct {
+	configPath     string
+	force          bool
+	observe        bool
+	observeChannel string
+	logMaxSize     string
+	logMaxBackups  int
+	showVersion    bool
+	args           []string
+}
+
+func parseRootCLIOptions(args []string) (rootCLIOptions, error) {
+	fs := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	fs.Usage = printUsage
+
+	configPath := fs.String("config", "", "path to config file (default: ./config.toml or ~/.cc-connect/config.toml)")
+	force := fs.Bool("force", false, "kill any existing instance with the same config before starting")
+	observe := fs.Bool("observe", false, "observe native terminal Claude Code sessions and forward to Slack")
+	observeChannel := fs.String("observe-channel", "", "Slack channel ID to forward terminal observations to (requires --observe)")
+	logMaxSize := fs.String("log-max-size", "", "max bytes for the rotating log file (e.g. 10MB, 512K, 10485760); overrides CC_LOG_MAX_SIZE env var (default: 10MB)")
+	logMaxBackups := fs.Int("log-max-backups", 0, "number of rotated log files to retain (.log.1 .. .log.N); overrides CC_LOG_MAX_BACKUPS env var (default: 3)")
+	showVersion := fs.Bool("version", false, "print version and exit")
+
+	if err := fs.Parse(args); err != nil {
+		return rootCLIOptions{}, err
+	}
+
+	return rootCLIOptions{
+		configPath:     *configPath,
+		force:          *force,
+		observe:        *observe,
+		observeChannel: *observeChannel,
+		logMaxSize:     *logMaxSize,
+		logMaxBackups:  *logMaxBackups,
+		showVersion:    *showVersion,
+		args:           fs.Args(),
+	}, nil
+}
+
+func validateNoExtraTopLevelArgs(args []string) error {
+	if len(args) == 0 {
+		return nil
+	}
+	return fmt.Errorf("unknown top-level command: %s", args[0])
 }
 
 // sessionStorePath builds a unique filename from project name + work_dir.
@@ -1276,7 +1586,7 @@ func printUsage() {
 
   Bridge your messaging platforms to local AI coding agents.
   Supports: Claude Code, Codex, Cursor, Gemini CLI, Qoder CLI, OpenCode
-  Platforms: Feishu, Telegram, Slack, DingTalk, Discord, LINE, WeChat Work, Weixin, QQ, QQ Bot
+  Platforms: Feishu, TuiTui, Telegram, Slack, DingTalk, Discord, LINE, WeChat Work, Weixin, QQ, QQ Bot
 
   GitHub:  https://github.com/Unimountltd/cc-connect
   Docs:    https://github.com/Unimountltd/cc-connect/blob/main/INSTALL.md
@@ -1307,6 +1617,7 @@ Commands:
   cron               Manage scheduled tasks
     add              Create a scheduled task (-c <expr> --prompt <text>)
     list             List scheduled tasks
+    exec             Trigger a scheduled task immediately
     del              Delete a scheduled task by ID
 
   sessions           Browse session history
@@ -1328,6 +1639,12 @@ Commands:
     setup            Smart setup (QR create or bind when --app is provided)
     new              Force QR onboarding to create a new bot
     bind             Bind existing app_id/app_secret
+
+  tuitui             Access TuiTui history, posts, and attachments
+    messages         Read chat history
+    search           Search chat history
+    post             Post a channel message
+    download         Download a message attachment
 
   weixin             Setup Weixin personal (ilink) via QR or token
     setup            QR login, or bind when --token is provided
@@ -1362,6 +1679,7 @@ Examples:
   cc-connect cron list                List all scheduled tasks
   cc-connect feishu setup             Setup Feishu/Lark bot credentials
   cc-connect weixin setup             Setup Weixin (ilink) with QR or --token
+  cc-connect yuanbao setup            Setup Yuanbao bot with --token app_key:app_secret
   cc-connect update                   Update to the latest version
   cc-connect config format            Format the config file
   cc-connect config example > c.toml  Save example config to a file
@@ -1399,6 +1717,11 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 
 	result := &core.ConfigReloadResult{}
 
+	// Re-apply process-global hot-reloadable settings.
+	if globalAPIServer != nil {
+		globalAPIServer.SetMaxAttachmentSize(resolveMaxAttachmentSize(cfg))
+	}
+
 	// Find the matching project
 	var proj *config.ProjectConfig
 	for i := range cfg.Projects {
@@ -1412,17 +1735,27 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	}
 
 	// Reload display config (includes legacy quiet → display mapping)
-	_, tm, tool, tmlen, toollen, showCtx, showFooter := config.EffectiveDisplay(cfg, proj)
+	mode, tm, tool, tmlen, toollen, showCtx, showFooter, hideAgentFooter := config.EffectiveDisplay(cfg, proj)
+	historyMaxLen := config.EffectiveHistoryMaxLen(cfg, proj)
 	engine.SetDisplayConfig(core.DisplayCfg{
+		Mode:             mode,
+		CardMode:         config.EffectiveCardMode(cfg, proj),
 		ThinkingMessages: tm,
 		ThinkingMaxLen:   tmlen,
 		ToolMaxLen:       toollen,
 		ToolMessages:     tool,
+		HistoryMaxLen:    &historyMaxLen,
+		HideAgentFooter:  hideAgentFooter,
 	})
 	result.DisplayUpdated = true
 
 	// Wire show_context_indicator and reply_footer from display config
 	engine.SetShowContextIndicator(showCtx)
+	showWorkdir := true
+	if proj.ShowWorkdirIndicator != nil {
+		showWorkdir = *proj.ShowWorkdirIndicator
+	}
+	engine.SetShowWorkdirIndicator(showWorkdir)
 	engine.SetReplyFooterEnabled(showFooter)
 
 	// Reload auto-compress settings
@@ -1444,7 +1777,18 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	} else {
 		engine.SetResetOnIdle(0)
 	}
-
+	if proj.AgentSessionIdleTimeoutMins != nil {
+		mins := *proj.AgentSessionIdleTimeoutMins
+		if mins <= 0 {
+			engine.SetAgentSessionIdleTimeout(0)
+		} else {
+			engine.SetAgentSessionIdleTimeout(time.Duration(mins) * time.Minute)
+		}
+	} else {
+		// A reload may remove this option after timers were scheduled; reset
+		// explicitly so those stale idle-close timers cannot fire later.
+		engine.SetAgentSessionIdleTimeout(0)
+	}
 
 	// Reload sender injection
 	engine.SetInjectSender(proj.InjectSender != nil && *proj.InjectSender)

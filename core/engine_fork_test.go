@@ -45,6 +45,8 @@ func TestEngineSendToSessionWithAttachments_ProactiveAfterRestart(t *testing.T) 
 		"delivery ready",
 		nil,
 		[]FileAttachment{{MimeType: "text/plain", Data: []byte("doc"), FileName: "report.txt"}},
+		nil,
+		false,
 	); err != nil {
 		t.Fatalf("SendToSessionWithAttachments returned error: %v", err)
 	}
@@ -71,7 +73,7 @@ func TestEngineSendToSessionWithAttachments_ProactiveExplicitKey(t *testing.T) {
 	e.sessions.GetOrCreateActive(slackKey)
 	e.sessions.GetOrCreateActive(tgKey)
 
-	if err := e.SendToSessionWithAttachments(tgKey, "hello", nil, nil); err != nil {
+	if err := e.SendToSessionWithAttachments(tgKey, "hello", nil, nil, nil, false); err != nil {
 		t.Fatalf("SendToSessionWithAttachments returned error: %v", err)
 	}
 	if p.reconstructed != tgKey {
@@ -87,7 +89,7 @@ func TestEngineSendToSessionWithAttachments_ProactiveAmbiguous(t *testing.T) {
 	e.sessions.GetOrCreateActive("slack:C1:U1")
 	e.sessions.GetOrCreateActive("slack:C2:U2")
 
-	err := e.SendToSessionWithAttachments("", "hi", nil, nil)
+	err := e.SendToSessionWithAttachments("", "hi", nil, nil, nil, false)
 	if err == nil {
 		t.Fatal("expected ambiguous-session error")
 	}
@@ -104,7 +106,7 @@ func TestEngineSendToSessionWithAttachments_ProactiveUnsupported(t *testing.T) {
 
 	e.sessions.GetOrCreateActive("slack:C1:U1")
 
-	err := e.SendToSessionWithAttachments("", "hi", nil, nil)
+	err := e.SendToSessionWithAttachments("", "hi", nil, nil, nil, false)
 	if err == nil {
 		t.Fatal("expected unsupported-platform error")
 	}
@@ -118,7 +120,7 @@ func TestEngineSendToSessionWithAttachments_ProactiveNoSessions(t *testing.T) {
 	store := filepath.Join(t.TempDir(), "sessions.json")
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, store, LangEnglish)
 
-	err := e.SendToSessionWithAttachments("", "hi", nil, nil)
+	err := e.SendToSessionWithAttachments("", "hi", nil, nil, nil, false)
 	if err == nil {
 		t.Fatal("expected no-active-session error")
 	}
@@ -204,8 +206,12 @@ func TestExecuteCardAction_ModelUsesWorkspaceContext(t *testing.T) {
 	if globalAgent.model != "global-old" {
 		t.Fatalf("global agent model = %q, want unchanged", globalAgent.model)
 	}
-	if got := ws.sessions.GetOrCreateActive(sessionKey).AgentSessionID; got != "" {
-		t.Fatalf("workspace session id = %q, want cleared", got)
+	// Upstream now preserves the agent session ID across a /model switch so the
+	// next StartSession can use "--resume <id> --model <new>" and keep context
+	// natively. The contract this test guards is that the switch lands on the
+	// *workspace* agent and session, not the project-level one.
+	if got := ws.sessions.GetOrCreateActive(sessionKey).AgentSessionID; got != "workspace-session" {
+		t.Fatalf("workspace session id = %q, want preserved", got)
 	}
 	if got := e.sessions.GetOrCreateActive(sessionKey).AgentSessionID; got != "global-session" {
 		t.Fatalf("global session id = %q, want untouched", got)
@@ -342,6 +348,15 @@ func TestPsPrefix_ShortCircuitsToPsCommand(t *testing.T) {
 		}
 		e.interactiveMu.Unlock()
 
+		// /ps only supplements a turn already in flight — upstream rejects it
+		// on an idle session because agentSession.Send would race the next
+		// normal message on the CLI's stdin. Hold the session lock so the
+		// shortcut has a live turn to append to.
+		sess := e.sessions.GetOrCreateActive(key)
+		if !sess.TryLock() {
+			t.Fatal("could not lock session for /ps test")
+		}
+
 		msg := &Message{
 			SessionKey: key,
 			Platform:   "test",
@@ -349,6 +364,7 @@ func TestPsPrefix_ShortCircuitsToPsCommand(t *testing.T) {
 			ReplyCtx:   "ctx",
 		}
 		e.handleMessage(p, msg)
+		sess.Unlock()
 
 		sent := p.getSent()
 		found := false
@@ -842,7 +858,6 @@ func TestRetryLoop_StopCancelsWait(t *testing.T) {
 	}
 }
 
-
 // ── helpers ──────────────────────────────────────────
 
 func withShortRateLimitDelays(t *testing.T, initial, retry time.Duration, maxAttempts int) {
@@ -916,4 +931,3 @@ func (a *scriptedAgent) StartCount() int {
 	defer a.mu.Unlock()
 	return a.starts
 }
-

@@ -25,9 +25,35 @@ const PLATFORM_OPTIONS: { key: string; label: string; color: string; abbr: strin
   { key: 'wecom', label: 'WeChat Work', abbr: 'WC', color: 'bg-emerald-50 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400' },
   { key: 'qq', label: 'QQ (OneBot)', abbr: 'QQ', color: 'bg-cyan-50 dark:bg-cyan-900/30 text-cyan-600 dark:text-cyan-400' },
   { key: 'qqbot', label: 'QQ Bot (Official)', abbr: 'QB', color: 'bg-cyan-50 dark:bg-cyan-900/30 text-cyan-600 dark:text-cyan-400' },
+  { key: 'yuanbao', label: 'Yuanbao', abbr: 'YB', color: 'bg-rose-50 dark:bg-rose-900/30 text-rose-600 dark:text-rose-400' },
   { key: 'line', label: 'LINE', abbr: 'LN', color: 'bg-lime-50 dark:bg-lime-900/30 text-lime-600 dark:text-lime-400' },
   { key: 'weibo', label: 'Weibo (微博)', abbr: 'WB', color: 'bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-400' },
+  { key: 'tuitui', label: 'TuiTui (推推)', abbr: 'TT', color: 'bg-teal-50 dark:bg-teal-900/30 text-teal-700 dark:text-teal-300' },
+  { key: 'cloud_web', label: 'Cloud Web (自建 IM)', abbr: 'CW', color: 'bg-violet-50 dark:bg-violet-900/30 text-violet-600 dark:text-violet-400' },
 ];
+
+// Permission mode options per agent type. The values must match the keys
+// emitted by each agent's `normalizeMode` / `PermissionModes` so that
+// "save" round-trips correctly. See:
+//   claudecode: agent/claudecode/claudecode.go:818  (PermissionModes)
+//   codex:      agent/codex/codex.go:129            (normalizeMode)
+const CLAUDECODE_MODE_OPTIONS: { value: string; label: string }[] = [
+  { value: 'default', label: 'default' },
+  { value: 'acceptEdits', label: 'acceptEdits (edit)' },
+  { value: 'plan', label: 'plan' },
+  { value: 'bypassPermissions', label: 'bypassPermissions (yolo)' },
+  { value: 'dontAsk', label: 'dontAsk' },
+];
+const CODEX_MODE_OPTIONS: { value: string; label: string }[] = [
+  { value: 'suggest', label: 'suggest (default)' },
+  { value: 'auto-edit', label: 'auto-edit' },
+  { value: 'full-auto', label: 'full-auto' },
+  { value: 'yolo', label: 'yolo (bypass)' },
+];
+const MODE_OPTIONS_BY_AGENT: Record<string, { value: string; label: string }[]> = {
+  claudecode: CLAUDECODE_MODE_OPTIONS,
+  codex: CODEX_MODE_OPTIONS,
+};
 
 const isQRPlatform = (type: string) => type === 'feishu' || type === 'lark' || type === 'weixin';
 
@@ -50,6 +76,7 @@ export default function ProjectDetail() {
   const [workDir, setWorkDir] = useState('');
   const [agentMode, setAgentMode] = useState('');
   const [showCtxIndicator, setShowCtxIndicator] = useState(true);
+  const [showWorkdirIndicator, setShowWorkdirIndicator] = useState(true);
   const [replyFooter, setReplyFooter] = useState(true);
   const [injectSender, setInjectSender] = useState(false);
   const [platformAllowFrom, setPlatformAllowFrom] = useState<Record<string, string>>({});
@@ -82,6 +109,13 @@ export default function ProjectDetail() {
   const navigate = useNavigate();
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
+
+  // Permission mode options track the *effective* agent type: a freshly-picked
+  // type overrides the saved one so the dropdown matches what would be saved.
+  // Unknown agent types fall back to ClaudeCode (matches the previous hardcoded
+  // behavior) so this change is non-breaking for other agents.
+  const effectiveAgentType = selectedAgentType || project?.agent_type || '';
+  const modeOptions = MODE_OPTIONS_BY_AGENT[effectiveAgentType] || CLAUDECODE_MODE_OPTIONS;
 
   const handleDeleteProject = async () => {
     if (!name) return;
@@ -136,6 +170,7 @@ export default function ProjectDetail() {
         setAgentMode(proj.value.agent_mode || 'default');
         setSelectedAgentType(proj.value.agent_type || '');
         setShowCtxIndicator(proj.value.show_context_indicator !== false);
+        setShowWorkdirIndicator(proj.value.show_workdir_indicator !== false);
         setReplyFooter(proj.value.reply_footer !== false);
         setInjectSender(proj.value.inject_sender === true);
         setProviderRefs(proj.value.provider_refs || []);
@@ -184,6 +219,7 @@ export default function ProjectDetail() {
         mode: agentMode,
         ...(agentTypeChanged ? { agent_type: selectedAgentType } : {}),
         show_context_indicator: showCtxIndicator,
+        show_workdir_indicator: showWorkdirIndicator,
         reply_footer: replyFooter,
         inject_sender: injectSender,
         platform_allow_from: platformAllowFrom,
@@ -516,11 +552,12 @@ export default function ProjectDetail() {
                 onChange={(e) => setAgentMode(e.target.value)}
                 className="w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-accent/50"
               >
-                <option value="default">default</option>
-                <option value="acceptEdits">acceptEdits (edit)</option>
-                <option value="plan">plan</option>
-                <option value="bypassPermissions">bypassPermissions (yolo)</option>
-                <option value="dontAsk">dontAsk</option>
+                {modeOptions.map((opt) => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+                {agentMode && !modeOptions.some((o) => o.value === agentMode) && (
+                  <option value={agentMode}>{agentMode}</option>
+                )}
               </select>
             </div>
           </div>
@@ -532,8 +569,20 @@ export default function ProjectDetail() {
           <div className="space-y-4 max-w-lg">
             <div className="flex items-center justify-between">
               <div>
-                <label className="text-sm font-medium text-gray-700 dark:text-gray-300">{t('projects.showCtxIndicator', 'Context indicator')}</label>
-                <p className="text-[11px] text-gray-400 mt-0.5">{t('projects.showCtxIndicatorHint', 'Show [ctx: ~N%] suffix on replies')}</p>
+                <label className="text-sm font-medium text-gray-700 dark:text-gray-300">{t('projects.replyFooter', 'Reply footer')}</label>
+                <p className="text-[11px] text-gray-400 mt-0.5">{t('projects.replyFooterHint', 'Master toggle for the per-turn reply footer')}</p>
+              </div>
+              <button
+                onClick={() => setReplyFooter(!replyFooter)}
+                className={cn('w-10 h-6 rounded-full transition-colors', replyFooter ? 'bg-accent' : 'bg-gray-300 dark:bg-gray-700')}
+              >
+                <div className={cn('w-4 h-4 bg-white rounded-full transition-transform mx-1', replyFooter ? 'translate-x-4' : 'translate-x-0')} />
+              </button>
+            </div>
+            <div className="flex items-center justify-between">
+              <div>
+                <label className="text-sm font-medium text-gray-700 dark:text-gray-300">{t('projects.showCtxIndicator', 'Footer line 1: context')}</label>
+                <p className="text-[11px] text-gray-400 mt-0.5">{t('projects.showCtxIndicatorHint', 'Show model · effort · token usage · context % line in the reply footer')}</p>
               </div>
               <button
                 onClick={() => setShowCtxIndicator(!showCtxIndicator)}
@@ -544,14 +593,14 @@ export default function ProjectDetail() {
             </div>
             <div className="flex items-center justify-between">
               <div>
-                <label className="text-sm font-medium text-gray-700 dark:text-gray-300">{t('projects.replyFooter', 'Reply footer')}</label>
-                <p className="text-[11px] text-gray-400 mt-0.5">{t('projects.replyFooterHint', 'Append model/usage metadata to replies')}</p>
+                <label className="text-sm font-medium text-gray-700 dark:text-gray-300">{t('projects.showWorkdirIndicator', 'Footer line 2: workdir')}</label>
+                <p className="text-[11px] text-gray-400 mt-0.5">{t('projects.showWorkdirIndicatorHint', 'Show workspace directory line in the reply footer')}</p>
               </div>
               <button
-                onClick={() => setReplyFooter(!replyFooter)}
-                className={cn('w-10 h-6 rounded-full transition-colors', replyFooter ? 'bg-accent' : 'bg-gray-300 dark:bg-gray-700')}
+                onClick={() => setShowWorkdirIndicator(!showWorkdirIndicator)}
+                className={cn('w-10 h-6 rounded-full transition-colors', showWorkdirIndicator ? 'bg-accent' : 'bg-gray-300 dark:bg-gray-700')}
               >
-                <div className={cn('w-4 h-4 bg-white rounded-full transition-transform mx-1', replyFooter ? 'translate-x-4' : 'translate-x-0')} />
+                <div className={cn('w-4 h-4 bg-white rounded-full transition-transform mx-1', showWorkdirIndicator ? 'translate-x-4' : 'translate-x-0')} />
               </button>
             </div>
             <div className="flex items-center justify-between">

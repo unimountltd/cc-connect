@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -14,6 +16,13 @@ import (
 // to use --continue (resume most recent session) instead of a specific session ID.
 const ContinueSession = "__continue__"
 
+// ExplicitActivationTTL is the hard ceiling for the explicit-activation
+// exemption (issue #1731). Even when a user has `/switch`-ed to a session,
+// if no real user activity has been recorded for this long, the idle reset
+// must still fire so a long-silent session cannot permanently occupy the
+// active slot.
+const ExplicitActivationTTL = 7 * 24 * time.Hour
+
 // Session tracks one conversation between a user and the agent.
 type Session struct {
 	ID                  string         `json:"id"`
@@ -21,9 +30,31 @@ type Session struct {
 	AgentSessionID      string         `json:"agent_session_id"`
 	AgentType           string         `json:"agent_type,omitempty"`
 	PastAgentSessionIDs []string       `json:"past_agent_session_ids,omitempty"`
-	History             []HistoryEntry `json:"history"`
-	CreatedAt           time.Time      `json:"created_at"`
-	UpdatedAt           time.Time      `json:"updated_at"`
+	// ActiveProvider is the agent provider name that was active when this
+	// session last took a turn. It is restored before --resume so that a
+	// cc-connect process restart does not silently drop a user's
+	// `/provider switch` (the agent_session_id survives on disk while the
+	// in-memory active provider does not). Empty means "no explicit choice
+	// — use whatever the agent's default is".
+	ActiveProvider string         `json:"active_provider,omitempty"`
+	History        []HistoryEntry `json:"history"`
+	CreatedAt      time.Time      `json:"created_at"`
+	UpdatedAt      time.Time      `json:"updated_at"`
+	// LastUserActivity records when a real user message was last received.
+	// Unlike UpdatedAt (bumped by every session.Unlock including heartbeats and
+	// unsolicited agent output), this field is only updated when the engine
+	// processes an actual incoming user message. It is used by reset_on_idle_mins
+	// so that automated activity cannot prevent idle session rotation.
+	LastUserActivity time.Time `json:"last_user_activity,omitempty"`
+
+	// ExplicitActivatedAt records when this session was last explicitly chosen
+	// by the user (via /switch, /new against an existing entry, or any other
+	// intentional selection). Issue #1731: an explicit choice should override
+	// reset_on_idle_mins, otherwise the very first message after /switch into
+	// a long-idle session is wrongly routed to a brand-new session.
+	// ExplicitActivationTTL caps how long this exemption lasts so abandoned
+	// sessions cannot permanently occupy the active slot.
+	ExplicitActivatedAt time.Time `json:"explicit_activated_at,omitempty"`
 
 	mu   sync.Mutex `json:"-"`
 	busy bool       `json:"-"`
@@ -127,10 +158,69 @@ func (s *Session) GetName() string {
 	return s.Name
 }
 
+// TouchUserActivity records the current time as the last user-driven activity
+// on this session. Call this once per incoming user message, after the idle
+// reset check, so that only real user interactions reset the idle timer.
+func (s *Session) TouchUserActivity() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.LastUserActivity = time.Now()
+}
+
+// MarkExplicitlyActivated records that the user explicitly chose this session
+// (issue #1731). Use this from /switch, SwitchToAgentSession, and any other
+// path that intentionally points the dispatcher at a specific session. The
+// idle-reset decision treats ExplicitActivatedAt as the baseline for the
+// explicit-activation grace window (capped at ExplicitActivationTTL).
+func (s *Session) MarkExplicitlyActivated() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.markExplicitlyActivatedLocked()
+}
+
+// markExplicitlyActivatedLocked is the lock-free internal variant for
+// callers that already hold s.mu (tests, internal invariants).
+func (s *Session) markExplicitlyActivatedLocked() {
+	s.ExplicitActivatedAt = time.Now()
+}
+
+// GetExplicitActivatedAt returns when this session was last explicitly chosen.
+func (s *Session) GetExplicitActivatedAt() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ExplicitActivatedAt
+}
+
+// GetLastUserActivity returns when the last real user message was received.
+// Returns zero time if no user message has been processed yet.
+func (s *Session) GetLastUserActivity() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.LastUserActivity
+}
+
 func (s *Session) GetUpdatedAt() time.Time {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.UpdatedAt
+}
+
+// SetActiveProvider atomically records the provider name the user last
+// switched to for this session. Pass an empty string to clear the choice
+// (e.g. on `/provider clear`). Callers are expected to call
+// SessionManager.Save() afterwards so the value survives a process restart.
+func (s *Session) SetActiveProvider(name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ActiveProvider = name
+}
+
+// GetActiveProvider atomically reads the provider name the user last
+// switched to for this session. Empty means "no explicit choice".
+func (s *Session) GetActiveProvider() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ActiveProvider
 }
 
 // SetAgentSessionID atomically sets the agent session ID and agent type.
@@ -336,6 +426,7 @@ func (sm *SessionManager) SwitchSession(userKey, target string) (*Session, error
 		s := sm.sessions[sid]
 		if s != nil && (s.ID == target || s.Name == target) {
 			sm.activeSession[userKey] = s.ID
+			s.MarkExplicitlyActivated()
 			sm.saveLocked()
 			return s, nil
 		}
@@ -361,6 +452,7 @@ func (sm *SessionManager) SwitchToAgentSession(userKey, agentSID, agentName, sum
 		s.mu.Unlock()
 		if aid == agentSID {
 			sm.activeSession[userKey] = s.ID
+			s.MarkExplicitlyActivated()
 			sm.saveLocked()
 			return s
 		}
@@ -368,6 +460,7 @@ func (sm *SessionManager) SwitchToAgentSession(userKey, agentSID, agentName, sum
 
 	s := sm.createLocked(userKey, summary)
 	s.SetAgentInfo(agentSID, agentName, summary)
+	s.MarkExplicitlyActivated()
 	sm.saveLocked()
 	return s
 }
@@ -607,6 +700,11 @@ func (sm *SessionManager) saveLocked() {
 			History:             append([]HistoryEntry(nil), s.History...),
 			CreatedAt:           s.CreatedAt,
 			UpdatedAt:           s.UpdatedAt,
+			LastUserActivity:    s.LastUserActivity,
+			// #1731: explicit-activation timestamp must survive a process
+			// restart; otherwise a /switch followed by a crash would lose the
+			// exemption and the next message after restart would be rotated.
+			ExplicitActivatedAt: s.ExplicitActivatedAt,
 		}
 		s.mu.Unlock()
 	}
@@ -740,4 +838,193 @@ func (sm *SessionManager) InvalidateForAgent(agentType string) {
 	if invalidated > 0 {
 		sm.saveLocked()
 	}
+}
+
+// ParseSessionKey extracts the base chat identifier from a sessionKey.
+// SessionKey formats:
+//   - "platform:chatID:userID" → baseChat="platform:chatID", userOrThread="userID"
+//   - "platform:chatID:root:rootID" → baseChat="platform:chatID", userOrThread="root:rootID"
+//   - "platform:chatID" → baseChat="platform:chatID", userOrThread=""
+func ParseSessionKey(sessionKey string) (platform, baseChat, userOrThread string) {
+	parts := strings.SplitN(sessionKey, ":", 4)
+	if len(parts) < 2 {
+		return sessionKey, "", ""
+	}
+	platform = parts[0]
+	if len(parts) == 2 {
+		// "platform:chatID" - shared session mode
+		return platform, sessionKey, ""
+	}
+	if len(parts) == 3 {
+		// "platform:chatID:userID" - default mode
+		return platform, platform + ":" + parts[1], parts[2]
+	}
+	// "platform:chatID:root:rootID" - thread isolation mode
+	return platform, platform + ":" + parts[1], parts[2] + ":" + parts[3]
+}
+
+// PruneResult reports the outcome of a prune operation.
+type PruneResult struct {
+	RemovedSessions []string // IDs of removed sessions
+	MergedHistory   int      // Total history entries merged
+	ChatsAffected   int      // Number of chat groups with duplicates
+}
+
+// PruneDuplicateSessions removes duplicate sessions for the same chat_id,
+// keeping only the most recently active one per base chat. History from
+// older sessions is merged into the kept session.
+//
+// This addresses the issue where the same chat_id can have multiple session
+// records due to:
+//  1. Different users sending messages (different sessionKeys)
+//  2. Thread isolation creating per-thread sessions
+//  3. Accidental duplicate creation via race conditions
+//
+// When mergeHistory=true, history entries from removed sessions are appended
+// to the kept session (sorted by timestamp). When false, only empty sessions
+// are removed.
+func (sm *SessionManager) PruneDuplicateSessions(mergeHistory bool) PruneResult {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	// Group sessions by baseChat
+	chatSessions := make(map[string][]*Session) // baseChat -> sessions
+	sessionToBaseChat := make(map[string]string) // session.ID -> baseChat
+
+	for userKey, sessionIDs := range sm.userSessions {
+		_, baseChat, _ := ParseSessionKey(userKey)
+		for _, sid := range sessionIDs {
+			s, ok := sm.sessions[sid]
+			if !ok || s == nil {
+				continue
+			}
+			chatSessions[baseChat] = append(chatSessions[baseChat], s)
+			sessionToBaseChat[sid] = baseChat
+		}
+	}
+
+	result := PruneResult{}
+	kept := make(map[string]*Session) // baseChat -> session to keep
+
+	// For each baseChat with multiple sessions, decide which to keep
+	for baseChat, sessions := range chatSessions {
+		if len(sessions) <= 1 {
+			continue
+		}
+		result.ChatsAffected++
+
+		// Sort by UpdatedAt descending (most recent first)
+		sort.Slice(sessions, func(i, j int) bool {
+			return sessions[i].GetUpdatedAt().After(sessions[j].GetUpdatedAt())
+		})
+
+		// Find the best session to keep
+		// Priority: most recent session with history, or most recent if none has history
+		var keep *Session
+		for _, s := range sessions {
+			s.mu.Lock()
+			hasHistory := len(s.History) > 0
+			s.mu.Unlock()
+			if hasHistory {
+				keep = s
+				break
+			}
+		}
+		// If no session has history, keep the most recent one
+		if keep == nil {
+			keep = sessions[0]
+		}
+		kept[baseChat] = keep
+
+		// Process other sessions for removal
+		for _, old := range sessions {
+			if old.ID == keep.ID {
+				continue // Skip the one we're keeping
+			}
+
+			old.mu.Lock()
+			hasHistory := len(old.History) > 0
+			oldHistoryLen := len(old.History)
+			old.mu.Unlock()
+
+			// When not merging: only remove empty sessions
+			if !mergeHistory && hasHistory {
+				continue // Keep sessions with history when not merging
+			}
+
+			// Merge history before removal
+			if mergeHistory && hasHistory {
+				keep.mu.Lock()
+				old.mu.Lock()
+				// Append old history to keep, then sort by timestamp.
+				// Use SliceStable so that entries with equal timestamps
+				// preserve their original relative order — relevant for
+				// IM platforms that timestamp at second precision.
+				keep.History = append(keep.History, old.History...)
+				sort.SliceStable(keep.History, func(i, j int) bool {
+					return keep.History[i].Timestamp.Before(keep.History[j].Timestamp)
+				})
+				result.MergedHistory += oldHistoryLen
+				old.mu.Unlock()
+				keep.mu.Unlock()
+			}
+
+			// Remove old session
+			sm.deleteByIDLocked(old.ID)
+			result.RemovedSessions = append(result.RemovedSessions, old.ID)
+
+			slog.Info("session: pruned duplicate",
+				"removed_session", old.ID,
+				"kept_session", keep.ID,
+				"base_chat", baseChat,
+				"history_merged", oldHistoryLen,
+			)
+		}
+	}
+
+	// Update activeSession: point each userKey to the kept session
+	for userKey, sessionIDs := range sm.userSessions {
+		if len(sessionIDs) == 0 {
+			continue
+		}
+		_, baseChat, _ := ParseSessionKey(userKey)
+		if keep, ok := kept[baseChat]; ok {
+			sm.activeSession[userKey] = keep.ID
+		}
+	}
+
+	if len(result.RemovedSessions) > 0 {
+		sm.saveLocked()
+		slog.Info("session: prune complete",
+			"removed", len(result.RemovedSessions),
+			"merged_history", result.MergedHistory,
+			"chats_affected", result.ChatsAffected,
+		)
+	}
+
+	return result
+}
+
+// PruneEmptySessions removes sessions with no history entries. Returns count of removed.
+func (sm *SessionManager) PruneEmptySessions() int {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	removed := 0
+	for _, s := range sm.sessions {
+		s.mu.Lock()
+		isEmpty := len(s.History) == 0
+		s.mu.Unlock()
+
+		if isEmpty {
+			sm.deleteByIDLocked(s.ID)
+			removed++
+		}
+	}
+
+	if removed > 0 {
+		sm.saveLocked()
+		slog.Info("session: pruned empty sessions", "removed", removed)
+	}
+	return removed
 }

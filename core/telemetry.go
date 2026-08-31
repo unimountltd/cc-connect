@@ -50,8 +50,8 @@ type TurnEvent struct {
 	TurnDurationMs      int64    `json:"turn_duration_ms"`
 	InputTokens         int      `json:"input_tokens"`
 	OutputTokens        int      `json:"output_tokens"`
-	CacheCreationTokens int      `json:"cache_creation_tokens"`
-	CacheReadTokens     int      `json:"cache_read_tokens"`
+	CacheCreationInputTokens int      `json:"cache_creation_tokens"`
+	CacheReadInputTokens     int      `json:"cache_read_tokens"`
 	ContextTokens       int      `json:"context_tokens"`
 	ToolCount           int      `json:"tool_count"`
 	ToolNames           []string `json:"tool_names,omitempty"`

@@ -161,9 +161,11 @@ func runUpdate() {
 	}
 	fmt.Printf("Installing: %s → %s\n", version, label)
 
+	// Resolve real asset URLs from the release object. Rolling tags (--channel
+	// latest) carry sha-suffixed filenames that cannot be guessed, so the
+	// assets list is authoritative; fall back to guessing for releases that
+	// expose none (e.g. the redirect-parsing path of fetchLatestStableRelease).
 	binURL, archiveURL := selectAssetURLs(release, runtime.GOOS, runtime.GOARCH)
-	// Fall back to URL guessing for releases that don't expose an assets list
-	// (e.g. the redirect-parsing fallback path of fetchLatestStableRelease).
 	if binURL == "" {
 		binURL = fmt.Sprintf("%s/%s/%s", downloadBase, latest, binaryAssetName(latest))
 	}
@@ -171,24 +173,31 @@ func runUpdate() {
 		archiveURL = fmt.Sprintf("%s/%s/%s", downloadBase, latest, archiveAssetName(latest))
 	}
 
-	fmt.Printf("Downloading %s ...\n", binURL)
+	// Try archive format first (tar.gz/zip), then bare binary as fallback.
+	fmt.Printf("Downloading %s ...\n", archiveURL)
 
-	tmpFile, err := downloadToTemp(binURL)
+	tmpFile, err := downloadToTemp(archiveURL)
+	needExtract := err == nil
+
 	if err != nil {
-		fmt.Printf("Bare binary not found, trying archive %s ...\n", archiveURL)
+		fmt.Printf("Archive not found, trying bare binary %s ...\n", binURL)
 
-		archiveTmp, archiveErr := downloadToTemp(archiveURL)
-		if archiveErr != nil {
-			fmt.Fprintf(os.Stderr, "Download failed: %v\n", archiveErr)
-			os.Exit(1)
-		}
-		defer os.Remove(archiveTmp)
-
-		tmpFile, err = extractBinaryFromArchive(archiveTmp, archiveURL)
+		tmpFile, err = downloadToTemp(binURL)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Extract failed: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Download failed: %v\n", err)
 			os.Exit(1)
 		}
+	}
+
+	if needExtract {
+		// Downloaded an archive - extract binary
+		extracted, extractErr := extractBinaryFromArchive(tmpFile, archiveURL)
+		os.Remove(tmpFile) // clean up archive
+		if extractErr != nil {
+			fmt.Fprintf(os.Stderr, "Extract failed: %v\n", extractErr)
+			os.Exit(1)
+		}
+		tmpFile = extracted
 	}
 	defer os.Remove(tmpFile)
 

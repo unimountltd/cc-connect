@@ -892,7 +892,7 @@ func (w *compactProgressWriter) freezeActiveLocked() {
 // renderActiveWithElapsed returns the active line with an elapsed-time suffix.
 // For thinking events: "💭 Thinking for 5s"; for tools: "📖 Reading xyz · 5s".
 func (w *compactProgressWriter) renderActiveWithElapsed(elapsed time.Duration) string {
-	es := formatElapsed(elapsed)
+	es := formatCompactElapsed(elapsed)
 	if w.activeKind == ProgressEntryThinking {
 		return fmt.Sprintf(translateMsg(w.lang, MsgCompactThinkingElapsed), es)
 	}
@@ -921,7 +921,7 @@ func (w *compactProgressWriter) buildCompactBlock(activeLine string) string {
 }
 
 // formatElapsed returns a short human-readable duration like "5s" or "2m13s".
-func formatElapsed(d time.Duration) string {
+func formatCompactElapsed(d time.Duration) string {
 	secs := int(d.Seconds())
 	if secs < 60 {
 		return fmt.Sprintf("%ds", secs)

@@ -3,6 +3,7 @@
 package daemon
 
 import (
+	"encoding/xml"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -241,4 +242,264 @@ func containsCall(calls []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// TestBuildPlist_EscapesXMLSpecialCharsInPaths pins the bug where unescaped
+// '&', '<', '>', quotes, and apostrophes in cfg paths produced malformed XML that
+// `launchctl bootstrap` rejected.
+func TestBuildPlist_EscapesXMLSpecialCharsInPaths(t *testing.T) {
+	cfg := Config{
+		BinaryPath: "/opt/cc-connect/bin & <tools>/cc-connect",
+		WorkDir:    "/Users/jane/Projects/dev & test/cc-connect",
+		LogFile:    "/Users/jane/Library/Logs/cc \"connect\".log",
+		LogMaxSize: 10485760,
+		EnvPATH:    "/usr/bin:/path/with'apostrophe/bin",
+	}
+	out := buildPlist(cfg)
+
+	// 1) Result must parse as well-formed XML — without escaping, bare '&'
+	//    or unbalanced '<' inside <string> elements break the parser.
+	if err := xml.Unmarshal([]byte(out), new(struct{ XMLName xml.Name })); err != nil {
+		t.Fatalf("buildPlist output is not valid XML: %v\n%s", err, out)
+	}
+
+	// 2) Round-trip the values through the XML parser and make sure the
+	//    original characters survive the encode/decode cycle. Walk every
+	//    text node rather than relying on a positional path, since the
+	//    plist nests <array>/<dict>/<string> at multiple depths.
+	values := collectXMLText(t, []byte(out))
+	mustContain := []string{cfg.BinaryPath, cfg.WorkDir, cfg.LogFile, cfg.EnvPATH}
+	for _, want := range mustContain {
+		found := false
+		for _, got := range values {
+			if got == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("decoded plist does not contain expected value %q\nvalues = %#v", want, values)
+		}
+	}
+
+	// 3) The raw XML output must not contain a bare '&' followed by anything
+	//    other than a recognized entity reference — that's what would crash
+	//    launchctl.
+	for i := 0; i < len(out); i++ {
+		if out[i] != '&' {
+			continue
+		}
+		rest := out[i:]
+		if !(strings.HasPrefix(rest, "&amp;") ||
+			strings.HasPrefix(rest, "&lt;") ||
+			strings.HasPrefix(rest, "&gt;") ||
+			strings.HasPrefix(rest, "&quot;") ||
+			strings.HasPrefix(rest, "&apos;") ||
+			strings.HasPrefix(rest, "&#")) {
+			t.Fatalf("bare '&' at offset %d (not a valid entity ref): %q", i, rest[:min(len(rest), 30)])
+		}
+	}
+}
+
+func TestBuildPlist_IncludesEnvExtraSorted(t *testing.T) {
+	cfg := Config{
+		BinaryPath: "/opt/cc/cc",
+		WorkDir:    "/tmp/wd",
+		LogFile:    "/tmp/log",
+		LogMaxSize: 1024,
+		EnvPATH:    "/usr/bin",
+		EnvExtra: map[string]string{
+			"NO_PROXY":     "example.com",
+			"HTTPS_PROXY":  "http://1.2.3.4:8080",
+			"CUSTOM_TOKEN": "tok",
+		},
+	}
+	xml := buildPlist(cfg)
+	wantOrder := []string{
+		"<key>CUSTOM_TOKEN</key>",
+		"<key>HTTPS_PROXY</key>",
+		"<key>NO_PROXY</key>",
+	}
+	lastIdx := -1
+	for _, k := range wantOrder {
+		idx := strings.Index(xml, k)
+		if idx < 0 {
+			t.Fatalf("plist missing %s; xml=%s", k, xml)
+		}
+		if idx < lastIdx {
+			t.Fatalf("plist EnvExtra keys not in sorted order; first offender %s; xml=%s", k, xml)
+		}
+		lastIdx = idx
+	}
+	if !strings.Contains(xml, "<string>tok</string>") {
+		t.Fatalf("value missing for CUSTOM_TOKEN; xml=%s", xml)
+	}
+}
+
+func TestBuildPlist_RejectsInvalidEnvName(t *testing.T) {
+	cfg := Config{
+		BinaryPath: "/x", WorkDir: "/y", LogFile: "/l", LogMaxSize: 1, EnvPATH: "/p",
+		EnvExtra: map[string]string{"FOO BAR": "v", "1FOO": "v", "OK": "fine"},
+	}
+	xml := buildPlist(cfg)
+	if strings.Contains(xml, "FOO BAR") || strings.Contains(xml, "1FOO") {
+		t.Fatalf("invalid env names leaked into plist: %s", xml)
+	}
+	if !strings.Contains(xml, "<key>OK</key>") {
+		t.Fatalf("OK should remain: %s", xml)
+	}
+}
+
+func TestBuildPlist_EscapesXMLInValue(t *testing.T) {
+	cfg := Config{
+		BinaryPath: "/x", WorkDir: "/y", LogFile: "/l", LogMaxSize: 1, EnvPATH: "/p",
+		EnvExtra: map[string]string{"TRICKY": `a<b&c"d'e`},
+	}
+	xml := buildPlist(cfg)
+	idx := strings.Index(xml, "<key>TRICKY</key>")
+	if idx < 0 {
+		t.Fatalf("TRICKY missing: %s", xml)
+	}
+	tail := xml[idx:]
+	endStr := strings.Index(tail, "</string>")
+	if endStr < 0 {
+		t.Fatalf("malformed plist: %s", xml)
+	}
+	chunk := tail[:endStr]
+	for _, bad := range []string{"a<b", "b&c"} {
+		if strings.Contains(chunk, bad) {
+			t.Errorf("value not escaped: %s", chunk)
+		}
+	}
+	if !strings.Contains(chunk, "&lt;") {
+		t.Errorf("< not escaped: %s", chunk)
+	}
+	if !strings.Contains(chunk, "&amp;") {
+		t.Errorf("& not escaped: %s", chunk)
+	}
+}
+
+func TestBuildPlist_SkipsEmptyValuesAndTemplateOwnedKeys(t *testing.T) {
+	cfg := Config{
+		BinaryPath: "/x", WorkDir: "/y", LogFile: "/l", LogMaxSize: 1, EnvPATH: "/expected-path",
+		EnvExtra: map[string]string{
+			"EMPTY":           "",
+			"PATH":            "/should-not-override",
+			"CC_LOG_FILE":     "/should-not-override",
+			"CC_LOG_MAX_SIZE": "999999",
+			"REAL":            "ok",
+		},
+	}
+	xml := buildPlist(cfg)
+	if strings.Contains(xml, "<key>EMPTY</key>") {
+		t.Errorf("empty value should be skipped: %s", xml)
+	}
+	if strings.Contains(xml, "/should-not-override") {
+		t.Errorf("template-owned key was overridden: %s", xml)
+	}
+	if !strings.Contains(xml, "<string>/expected-path</string>") {
+		t.Errorf("expected template PATH preserved: %s", xml)
+	}
+	if !strings.Contains(xml, "<key>REAL</key>") {
+		t.Errorf("REAL key missing: %s", xml)
+	}
+}
+
+func TestInstallLaunchd_WritesPlistAt0600(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	orig := runLaunchctl
+	t.Cleanup(func() { runLaunchctl = orig })
+	runLaunchctl = func(args ...string) (string, error) { return "", nil }
+
+	mgr := &launchdManager{}
+	cfg := Config{
+		BinaryPath: "/bin/true",
+		WorkDir:    t.TempDir(),
+		LogFile:    filepath.Join(t.TempDir(), "cc.log"),
+		LogMaxSize: 1024,
+		EnvPATH:    "/usr/bin",
+		EnvExtra:   map[string]string{"NO_PROXY": "example.com"},
+	}
+	if err := mgr.Install(cfg); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	info, err := os.Stat(launchdPlistPath())
+	if err != nil {
+		t.Fatalf("stat plist: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("plist mode = %o, want 0600", info.Mode().Perm())
+	}
+}
+
+// TestInstallLaunchd_TightensExistingPlistFrom0644 covers the upgrade
+// path: a user from an earlier cc-connect version may already have a
+// 0644 plist on disk; os.WriteFile would truncate-in-place and *keep*
+// the old permissions, leaving captured token values world-readable.
+// Install must explicitly tighten the existing file to 0600.
+func TestInstallLaunchd_TightensExistingPlistFrom0644(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	orig := runLaunchctl
+	t.Cleanup(func() { runLaunchctl = orig })
+	runLaunchctl = func(args ...string) (string, error) { return "", nil }
+
+	plistPath := launchdPlistPath()
+	if err := os.MkdirAll(filepath.Dir(plistPath), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(plistPath, []byte("<plist>old</plist>\n"), 0o644); err != nil {
+		t.Fatalf("seed legacy plist: %v", err)
+	}
+	if info, _ := os.Stat(plistPath); info.Mode().Perm() != 0o644 {
+		t.Fatalf("precondition: seeded file mode = %o, want 0644", info.Mode().Perm())
+	}
+
+	mgr := &launchdManager{}
+	cfg := Config{
+		BinaryPath: "/bin/true",
+		WorkDir:    t.TempDir(),
+		LogFile:    filepath.Join(t.TempDir(), "cc.log"),
+		LogMaxSize: 1024,
+		EnvPATH:    "/usr/bin",
+		EnvExtra:   map[string]string{"CUSTOM_TOKEN": "captured"},
+	}
+	if err := mgr.Install(cfg); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	info, err := os.Stat(plistPath)
+	if err != nil {
+		t.Fatalf("stat after Install: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("plist mode after reinstall = %o, want 0600", info.Mode().Perm())
+	}
+}
+
+// collectXMLText walks the XML stream and returns every chardata text node.
+// Used by the plist-escape test to verify path values round-trip through
+// xml.Decoder regardless of how deeply they are nested.
+func collectXMLText(t *testing.T, data []byte) []string {
+	t.Helper()
+	dec := xml.NewDecoder(strings.NewReader(string(data)))
+	var out []string
+	for {
+		tok, err := dec.Token()
+		if tok == nil {
+			break
+		}
+		if err != nil {
+			t.Fatalf("xml decode token: %v", err)
+		}
+		if cd, ok := tok.(xml.CharData); ok {
+			s := strings.TrimSpace(string(cd))
+			if s != "" {
+				out = append(out, s)
+			}
+		}
+	}
+	return out
 }

@@ -26,7 +26,7 @@ func newOrphanFakeSession() *orphanFakeSession {
 	}
 }
 
-func (s *orphanFakeSession) Send(prompt string, _ []ImageAttachment, _ []FileAttachment) error {
+func (s *orphanFakeSession) Send(prompt string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
 	return nil
 }
 func (s *orphanFakeSession) RespondPermission(_ string, res PermissionResult) error {

@@ -30,11 +30,11 @@ func TestProcessInteractiveEvents_IgnoresPhantomResult(t *testing.T) {
 	agentSession.events <- Event{Type: EventResult, Done: true}
 	// The user's real turn, with usage as any live turn reports.
 	agentSession.events <- Event{
-		Type:            EventResult,
-		Content:         "here is the real answer",
-		Done:            true,
-		CacheReadTokens: 428803,
-		OutputTokens:    730,
+		Type:                 EventResult,
+		Content:              "here is the real answer",
+		Done:                 true,
+		CacheReadInputTokens: 428803,
+		OutputTokens:         730,
 	}
 
 	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, state.replyCtx, telemetryMsgCtx{})
@@ -107,7 +107,7 @@ func TestProcessInteractiveEvents_EmptyResultWithUsageIsNotPhantom(t *testing.T)
 	}
 	e.interactiveStates[sessionKey] = state
 
-	agentSession.events <- Event{Type: EventResult, Done: true, CacheReadTokens: 12345}
+	agentSession.events <- Event{Type: EventResult, Done: true, CacheReadInputTokens: 12345}
 
 	done := make(chan struct{})
 	go func() {
@@ -146,13 +146,13 @@ func TestHandleRelay_IgnoresPhantomResult(t *testing.T) {
 
 	agentSession.events <- Event{Type: EventResult, Done: true}
 	agentSession.events <- Event{
-		Type:            EventResult,
-		Content:         "relayed answer",
-		Done:            true,
-		CacheReadTokens: 1000,
+		Type:                 EventResult,
+		Content:              "relayed answer",
+		Done:                 true,
+		CacheReadInputTokens: 1000,
 	}
 
-	resp, err := e.HandleRelay(context.Background(), "other-bot", "chat-1", "ping")
+	resp, err := e.HandleRelay(context.Background(), "other-bot", "test:chat-1:user", "ping")
 	if err != nil {
 		t.Fatalf("HandleRelay returned error: %v", err)
 	}
@@ -179,8 +179,8 @@ func TestIsPhantomResult(t *testing.T) {
 	}
 	for _, e := range []Event{
 		{Type: EventResult, InputTokens: 1},
-		{Type: EventResult, CacheCreationTokens: 1},
-		{Type: EventResult, CacheReadTokens: 1},
+		{Type: EventResult, CacheCreationInputTokens: 1},
+		{Type: EventResult, CacheReadInputTokens: 1},
 		{Type: EventResult, OutputTokens: 1},
 	} {
 		if isPhantomResult(e, nil, 0) {

@@ -223,4 +223,3 @@ func TestCmdNext_WithPromptStartsNewSessionAndDelivers(t *testing.T) {
 		t.Errorf("agent prompt = %q, want %q", got, "fix the login bug")
 	}
 }
-

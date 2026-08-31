@@ -9,24 +9,16 @@ import (
 )
 
 type projectStateData struct {
-	WorkDirOverride       string            `json:"work_dir_override,omitempty"`
-	WorkspaceDirOverrides map[string]string `json:"workspace_dir_overrides,omitempty"`
-	InjectPrompts         map[string]string `json:"inject_prompts,omitempty"` // channelID → custom prompt
-	// WorkspaceModels maps a workspace directory to the model/effort last
-	// selected for it via /model, /preset or /reasoning. Per-workspace agents
-	// are recreated on idle reap and on daemon restart; without this the
-	// selection silently reverts to the project-level config default.
-	WorkspaceModels map[string]WorkspaceModelPref `json:"workspace_models,omitempty"`
+	WorkDirOverride         string            `json:"work_dir_override,omitempty"`
+	WorkspaceDirOverrides   map[string]string `json:"workspace_dir_overrides,omitempty"`
+	WorkspaceModelOverrides map[string]string `json:"workspace_model_overrides,omitempty"`
+	InjectPrompts           map[string]string `json:"inject_prompts,omitempty"` // channelID → custom prompt
+	// WorkspaceEffortOverrides mirrors WorkspaceModelOverrides for reasoning
+	// effort, which upstream does not persist. /reasoning and /preset write
+	// here so a workspace's thinking level survives the idle reap that
+	// destroys its agent, and a daemon restart, just like its model does.
+	WorkspaceEffortOverrides map[string]string `json:"workspace_effort_overrides,omitempty"`
 }
-
-// WorkspaceModelPref is a per-workspace model selection. Empty fields mean
-// "inherit the project-level default".
-type WorkspaceModelPref struct {
-	Model  string `json:"model,omitempty"`
-	Effort string `json:"effort,omitempty"`
-}
-
-func (p WorkspaceModelPref) isZero() bool { return p.Model == "" && p.Effort == "" }
 
 // ProjectStateStore persists lightweight runtime state for one project.
 type ProjectStateStore struct {
@@ -85,46 +77,79 @@ func (ps *ProjectStateStore) ClearWorkspaceDirOverride(workspace string) {
 	}
 }
 
+func (ps *ProjectStateStore) WorkspaceModelOverride(workspace string) string {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	if ps.state.WorkspaceModelOverrides == nil {
+		return ""
+	}
+	return ps.state.WorkspaceModelOverrides[workspace]
+}
+
+func (ps *ProjectStateStore) SetWorkspaceModelOverride(workspace, model string) {
+	if model == "" {
+		ps.ClearWorkspaceModelOverride(workspace)
+		return
+	}
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.state.WorkspaceModelOverrides == nil {
+		ps.state.WorkspaceModelOverrides = make(map[string]string)
+	}
+	ps.state.WorkspaceModelOverrides[workspace] = model
+}
+
+func (ps *ProjectStateStore) ClearWorkspaceModelOverride(workspace string) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.state.WorkspaceModelOverrides == nil {
+		return
+	}
+	delete(ps.state.WorkspaceModelOverrides, workspace)
+	if len(ps.state.WorkspaceModelOverrides) == 0 {
+		ps.state.WorkspaceModelOverrides = nil
+	}
+}
+
 func (ps *ProjectStateStore) ClearWorkDirOverride() {
 	ps.SetWorkDirOverride("")
 }
 
-// WorkspaceModel returns the persisted model selection for a workspace
-// directory. The bool reports whether any selection is stored.
-func (ps *ProjectStateStore) WorkspaceModel(workspace string) (WorkspaceModelPref, bool) {
+// WorkspaceEffortOverride returns the persisted reasoning effort for a
+// workspace directory, or "" when the project default applies.
+func (ps *ProjectStateStore) WorkspaceEffortOverride(workspace string) string {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
-	if ps.state.WorkspaceModels == nil {
-		return WorkspaceModelPref{}, false
+	if ps.state.WorkspaceEffortOverrides == nil {
+		return ""
 	}
-	pref, ok := ps.state.WorkspaceModels[workspace]
-	return pref, ok
+	return ps.state.WorkspaceEffortOverrides[workspace]
 }
 
-// SetWorkspaceModel records the model selection for a workspace directory.
-// An all-empty pref clears the entry so the project default applies again.
-func (ps *ProjectStateStore) SetWorkspaceModel(workspace string, pref WorkspaceModelPref) {
-	if pref.isZero() {
-		ps.ClearWorkspaceModel(workspace)
+// SetWorkspaceEffortOverride records the reasoning effort for a workspace
+// directory. An empty effort clears the entry so the project default applies.
+func (ps *ProjectStateStore) SetWorkspaceEffortOverride(workspace, effort string) {
+	if effort == "" {
+		ps.ClearWorkspaceEffortOverride(workspace)
 		return
 	}
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
-	if ps.state.WorkspaceModels == nil {
-		ps.state.WorkspaceModels = make(map[string]WorkspaceModelPref)
+	if ps.state.WorkspaceEffortOverrides == nil {
+		ps.state.WorkspaceEffortOverrides = make(map[string]string)
 	}
-	ps.state.WorkspaceModels[workspace] = pref
+	ps.state.WorkspaceEffortOverrides[workspace] = effort
 }
 
-func (ps *ProjectStateStore) ClearWorkspaceModel(workspace string) {
+func (ps *ProjectStateStore) ClearWorkspaceEffortOverride(workspace string) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
-	if ps.state.WorkspaceModels == nil {
+	if ps.state.WorkspaceEffortOverrides == nil {
 		return
 	}
-	delete(ps.state.WorkspaceModels, workspace)
-	if len(ps.state.WorkspaceModels) == 0 {
-		ps.state.WorkspaceModels = nil
+	delete(ps.state.WorkspaceEffortOverrides, workspace)
+	if len(ps.state.WorkspaceEffortOverrides) == 0 {
+		ps.state.WorkspaceEffortOverrides = nil
 	}
 }
 

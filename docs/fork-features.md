@@ -87,6 +87,13 @@ Listed roughly newest-first within each section. Commit hashes link to fork hist
   `usageIndicator`, compact progress `SetUsage`, and the telemetry collector. Active
   model resolves from session first, then agent.
 
+  Since the v1.5.1 upstream merge the indicator is fed to `buildReplyFooter` as its
+  context segment rather than appended to the response body. It therefore obeys the
+  same `reply_footer` / `show_context_indicator` gating as every other status
+  segment, and never leaks into upstream's "metadata only" send path as a standalone
+  message. `buildReplyFooter` recognises the fork's bracketed group (not just
+  upstream's `[ctx: ~N%]`) so it still leads the footer line.
+
 ## Session control
 
 - **`/next <prompt>` + `--session-cmd /new --message "..."`** (`9d1e5a69`)
@@ -192,3 +199,88 @@ future upstream merges don't undo them.
 - **`EffectiveDisplay` / `SaveDisplayConfig` signature adapters** (`4f8d68bd`)
   Stop-gap: pass `nil` / discard the new `mode` return value until the fork adopts
   upstream's full display-mode enum.
+
+## Upstream convergence (v1.5.1 merge, 2026-08-31)
+
+Features the fork had built independently that upstream later implemented too.
+Recorded so nobody re-adds the fork's version on a future merge.
+
+- **Per-workspace model persistence** — upstream shipped the same feature in #1372
+  (`WorkspaceModelOverrides` + `persistWorkspaceModelOverride`, keyed off the agent's
+  own `GetWorkDir()`). The fork's parallel `WorkspaceModelPref` implementation was
+  dropped in favour of upstream's. The fork keeps only the half upstream lacks:
+  reasoning effort, as `WorkspaceEffortOverrides` +
+  `persistWorkspaceEffortOverride`, restored alongside the model in
+  `getOrCreateWorkspaceAgent`. `/reasoning` and `/preset` write it.
+
+- **`switchModelOnAgent` config gating** — the fork's fix (don't let a
+  workspace-scoped `/model` rewrite `config.toml`'s project default) is upstream's
+  behaviour now; the fork's `saveDefault` closure was removed.
+
+- **`commandContextWS`** — upstream's `commandContextWithWorkspace` is the same
+  helper. The fork's was renamed to upstream's name and its body kept.
+
+- **Event token field names** — upstream's `CacheCreationInputTokens` /
+  `CacheReadInputTokens` won over the fork's `CacheCreationTokens` /
+  `CacheReadTokens`; renamed fork-wide. The fork's `ContextTokens` and `ErrorKind`
+  remain as additions.
+
+- **`lastCtxTokens`** — superseded by upstream's richer per-sub-call `cs.lastUsage`
+  (`core.ContextUsage`). `Event.ContextTokens` is now sourced from it via
+  `currentContextTokens()`, so the two can never disagree.
+
+- **`EffectiveDisplay` / `SaveDisplayConfig` adapters** — the `4f8d68bd` stop-gap is
+  retired. The fork now passes upstream's `mode` and `hideAgentFooter` through and
+  sets `DisplayCfg.Mode` / `DisplayCfg.CardMode`.
+
+- **Slack streaming preview** — upstream added `platform/slack/streaming.go`
+  duplicating the fork's `SendPreviewStart` / `UpdateMessage`. The file was removed
+  and upstream's two improvements (thread targeting, `MarkdownToSlackMrkdwn`) were
+  folded into the fork's implementation, which keeps its `message_not_found`
+  handling and rate-limit bounded retry.
+
+### Upstream behaviour adopted over the fork's
+
+- **`/model` no longer resets the session.** Upstream keeps the agent session ID
+  across a model switch so the next `StartSession` runs
+  `--resume <id> --model <new>` and the CLI restores context natively, instead of
+  the fork's old clear-and-replay. Adopted for `/model`, its card action, and the
+  async switch path; the fork's per-workspace scoping of those paths is kept.
+
+- **`/ps` requires a live turn.** Upstream rejects `/ps` on an idle session
+  because `agentSession.Send` would bypass the session lock and race the next
+  normal message on the CLI's stdin. The fork's `ps:` bare-text shortcut still
+  rewrites to `/ps`; it just inherits the guard.
+
+### Merge hazard
+
+- **`/next` must stay in `builtinCommands`.** `/next` is fork-only. Taking
+  upstream's command list wholesale silently drops it and the command stops
+  resolving — the dispatch `case "next"` alone is not enough, since `cmdID` is
+  resolved from `builtinCommands` first. Same trap applies to any future
+  fork-only command.
+
+### Deliberate divergences kept
+
+- **Compact-progress elapsed ticker.** The card takes a second preview edit on
+  completion (the `· <elapsed>` suffix). Upstream's coalescing test was adapted to
+  assert the final edit rather than an exact edit count.
+
+- **Slack reply anchor.** Upstream now routes app-mention replies to the thread root.
+  The fork keeps channel-root replies for mentions outside a thread (`e3f64ca5`).
+
+- **Reply footer context format.** Upstream renders `[ctx: ~N%]`; the fork renders
+  the full usage indicator. `tests/release_local/turn_contract` was adapted to assert
+  the contract (exactly one indicator, at the tail) rather than upstream's literal
+  string — see `countCtxIndicators` / `hasCtxIndicator` in that file.
+
+- **`inTurn` is a counter, not a bool.** The fork's wakeup routing used a boolean
+  "a user turn is in flight" flag. Upstream's keep-alive test pipelines 100+ sends
+  before draining, which the boolean mis-handled (turns 2+ were misrouted to
+  `orphanEvents`). It is now an `atomic.Int32` incremented per `Send` and decremented
+  on each terminal event; `> 0` means a user turn owns the stream.
+
+- **Compaction is not an error.** The fork's `handleResult` routes any non-`success`
+  subtype to `EventError` for retry classification. Upstream's mid-turn compaction
+  arrives as `subtype: "compact"`/`"compaction"`, so it is explicitly excluded —
+  otherwise every auto-compact would abort the turn.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -25,6 +26,7 @@ type ProjectSettingsUpdate struct {
 	Mode                 *string
 	AgentType            *string
 	ShowContextIndicator *bool
+	ShowWorkdirIndicator *bool
 	ReplyFooter          *bool
 	InjectSender         *bool
 	PlatformAllowFrom    map[string]string
@@ -43,6 +45,7 @@ type ManagementServer struct {
 	engines map[string]*Engine // project name → engine
 
 	cronScheduler      *CronScheduler
+	timerScheduler     *TimerScheduler
 	heartbeatScheduler *HeartbeatScheduler
 	bridgeServer       *BridgeServer
 
@@ -87,6 +90,7 @@ func (m *ManagementServer) RegisterEngine(name string, e *Engine) {
 }
 
 func (m *ManagementServer) SetCronScheduler(cs *CronScheduler)           { m.cronScheduler = cs }
+func (m *ManagementServer) SetTimerScheduler(ts *TimerScheduler)         { m.timerScheduler = ts }
 func (m *ManagementServer) SetHeartbeatScheduler(hs *HeartbeatScheduler) { m.heartbeatScheduler = hs }
 func (m *ManagementServer) SetBridgeServer(bs *BridgeServer)             { m.bridgeServer = bs }
 func (m *ManagementServer) SetSetupFeishuSave(fn func(FeishuSetupSaveRequest) error) {
@@ -398,9 +402,23 @@ func (m *ManagementServer) handleStatus(w http.ResponseWriter, r *http.Request) 
 	defer m.mu.RUnlock()
 
 	platformSet := make(map[string]bool)
+	var degradedEntries []map[string]any
 	for _, e := range m.engines {
 		for _, p := range e.platforms {
 			platformSet[p.Name()] = true
+			// Issue #1618: surface per-platform degraded state in the
+			// management API so external monitors can alert on it.
+			if ph, ok := p.(PlatformHealth); ok {
+				info := ph.PlatformHealth()
+				if info.Degraded {
+					entry := map[string]any{
+						"name":    info.Name,
+						"reason":  info.DegradedReason,
+						"since":   info.DegradedSince,
+					}
+					degradedEntries = append(degradedEntries, entry)
+				}
+			}
 		}
 	}
 	platforms := make([]string, 0, len(platformSet))
@@ -419,6 +437,7 @@ func (m *ManagementServer) handleStatus(w http.ResponseWriter, r *http.Request) 
 		"connected_platforms": platforms,
 		"projects_count":      len(m.engines),
 		"bridge_adapters":     adapters,
+		"degraded_platforms":  degradedEntries,
 	}
 	if m.bridgeServer != nil {
 		resp["bridge"] = map[string]any{
@@ -636,10 +655,24 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 	if r.Method == http.MethodGet {
 		platInfos := make([]map[string]any, len(e.platforms))
 		for i, p := range e.platforms {
-			platInfos[i] = map[string]any{
+			entry := map[string]any{
 				"type":      p.Name(),
 				"connected": true,
 			}
+			// Issue #1618: surface per-platform degraded state instead
+			// of a hardcoded "connected": true.
+			if ph, ok := p.(PlatformHealth); ok {
+				info := ph.PlatformHealth()
+				if info.Degraded {
+					entry["connected"] = false
+					entry["degraded"] = true
+					entry["degraded_reason"] = info.DegradedReason
+					if !info.DegradedSince.IsZero() {
+						entry["degraded_since"] = info.DegradedSince
+					}
+				}
+			}
+			platInfos[i] = entry
 		}
 
 		allSessions := e.sessions.AllSessions()
@@ -713,6 +746,7 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 			Mode                 *string           `json:"mode"`
 			AgentType            *string           `json:"agent_type"`
 			ShowContextIndicator *bool             `json:"show_context_indicator"`
+			ShowWorkdirIndicator *bool             `json:"show_workdir_indicator"`
 			ReplyFooter          *bool             `json:"reply_footer"`
 			InjectSender         *bool             `json:"inject_sender"`
 			PlatformAllowFrom    map[string]string `json:"platform_allow_from"`
@@ -720,6 +754,14 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			mgmtError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 			return
+		}
+		if body.WorkDir != nil {
+			workDir, err := validateProjectWorkDir(*body.WorkDir)
+			if err != nil {
+				mgmtError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			*body.WorkDir = workDir
 		}
 
 		if body.Language != nil {
@@ -755,6 +797,9 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 		if body.ShowContextIndicator != nil {
 			e.SetShowContextIndicator(*body.ShowContextIndicator)
 		}
+		if body.ShowWorkdirIndicator != nil {
+			e.SetShowWorkdirIndicator(*body.ShowWorkdirIndicator)
+		}
 		if body.ReplyFooter != nil {
 			e.SetReplyFooterEnabled(*body.ReplyFooter)
 		}
@@ -788,6 +833,7 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 				Mode:                 body.Mode,
 				AgentType:            body.AgentType,
 				ShowContextIndicator: body.ShowContextIndicator,
+				ShowWorkdirIndicator: body.ShowWorkdirIndicator,
 				ReplyFooter:          body.ReplyFooter,
 				InjectSender:         body.InjectSender,
 				PlatformAllowFrom:    body.PlatformAllowFrom,
@@ -1551,14 +1597,29 @@ func (m *ManagementServer) handleCronByID(w http.ResponseWriter, r *http.Request
 		mgmtError(w, http.StatusServiceUnavailable, "cron scheduler not available")
 		return
 	}
-	id := strings.TrimPrefix(r.URL.Path, "/api/v1/cron/")
-	if id == "" {
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/cron/")
+	path = strings.Trim(path, "/")
+	if path == "" {
 		mgmtError(w, http.StatusBadRequest, "cron job id required")
 		return
+	}
+	parts := strings.Split(path, "/")
+	if len(parts) > 2 {
+		mgmtError(w, http.StatusNotFound, "unknown cron route")
+		return
+	}
+	id := parts[0]
+	action := ""
+	if len(parts) > 1 {
+		action = parts[1]
 	}
 
 	switch r.Method {
 	case http.MethodDelete:
+		if action != "" {
+			mgmtError(w, http.StatusNotFound, "unknown cron route")
+			return
+		}
 		if m.cronScheduler.RemoveJob(id) {
 			mgmtOK(w, "cron job deleted")
 		} else {
@@ -1566,6 +1627,10 @@ func (m *ManagementServer) handleCronByID(w http.ResponseWriter, r *http.Request
 		}
 
 	case http.MethodPatch:
+		if action != "" {
+			mgmtError(w, http.StatusNotFound, "unknown cron route")
+			return
+		}
 		var updates map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
 			mgmtError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -1584,8 +1649,26 @@ func (m *ManagementServer) handleCronByID(w http.ResponseWriter, r *http.Request
 		}
 		mgmtJSON(w, http.StatusOK, job)
 
+	case http.MethodPost:
+		if action != "exec" && action != "run" {
+			mgmtError(w, http.StatusNotFound, "unknown cron route")
+			return
+		}
+		if err := m.cronScheduler.RunJobNow(id); err != nil {
+			if errors.Is(err, ErrCronJobNotFound) {
+				mgmtError(w, http.StatusNotFound, err.Error())
+				return
+			}
+			mgmtError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		mgmtJSON(w, http.StatusAccepted, map[string]string{
+			"id":     id,
+			"status": "triggered",
+		})
+
 	default:
-		mgmtError(w, http.StatusMethodNotAllowed, "DELETE or PATCH only")
+		mgmtError(w, http.StatusMethodNotAllowed, "DELETE, PATCH, or POST only")
 	}
 }
 

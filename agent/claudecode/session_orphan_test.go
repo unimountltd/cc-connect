@@ -27,7 +27,7 @@ func TestSession_InTurnRoutingHappyPath(t *testing.T) {
 	cs.alive.Store(true)
 
 	// Active turn: simulate Send() setting inTurn=true.
-	cs.inTurn.Store(true)
+	cs.inTurn.Store(1)
 	cs.handleAssistant(map[string]any{
 		"message": map[string]any{
 			"content": []any{
@@ -53,7 +53,7 @@ func TestSession_InTurnRoutingHappyPath(t *testing.T) {
 	if resultEvt.Type != core.EventResult {
 		t.Fatalf("EventResult missing, got %v", resultEvt.Type)
 	}
-	if cs.inTurn.Load() {
+	if cs.inTurn.Load() > 0 {
 		t.Fatal("inTurn still true after EventResult")
 	}
 
@@ -138,7 +138,7 @@ func TestSession_TurnChannelLockedAtFirstEvent(t *testing.T) {
 	})
 
 	// Mid-stream, a user Send arrives — flips inTurn=true.
-	cs.inTurn.Store(true)
+	cs.inTurn.Store(1)
 
 	// Two more events of the SAME orphan turn arrive. Pre-fix these would
 	// have been routed to cs.events because emitEvent re-checked inTurn on
@@ -235,7 +235,7 @@ func TestSession_StartupSystemEventDoesNotLockTurnChannel(t *testing.T) {
 
 	// First real Send-driven turn. Pre-fix this would route to orphan
 	// because turnChannel was permanently locked by the startup event.
-	cs.inTurn.Store(true)
+	cs.inTurn.Store(1)
 	cs.handleAssistant(map[string]any{
 		"message": map[string]any{
 			"content": []any{
