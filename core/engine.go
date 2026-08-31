@@ -2443,6 +2443,22 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 		}
 	}
 
+	// A model chosen for this workspace via /model, /preset or /reasoning wins
+	// over the project-level default. Applied last so it survives both the idle
+	// reap that destroys this agent and a daemon restart.
+	if e.projectState != nil {
+		if pref, ok := e.projectState.WorkspaceModel(workspace); ok {
+			if pref.Model != "" {
+				opts["model"] = pref.Model
+			}
+			if pref.Effort != "" {
+				opts["reasoning_effort"] = pref.Effort
+			}
+			slog.Debug("workspace agent: restoring persisted model",
+				"workspace", workspace, "model", pref.Model, "effort", pref.Effort)
+		}
+	}
+
 	agent, err := CreateAgent(e.agent.Name(), opts)
 	if err != nil {
 		return nil, nil, fmt.Errorf("create workspace agent for %s: %w", workspace, err)
@@ -2781,6 +2797,31 @@ func (e *Engine) closeAgentSessionWithTimeout(sessionKey string, agentSession Ag
 
 const defaultEventIdleTimeout = 2 * time.Hour
 
+// phantomResultGrace bounds how long a turn waits for its real result after
+// a phantom one was ignored. If nothing else arrives within the window the
+// phantom is accepted as the turn's result after all, so a genuinely silent
+// turn can never stall the session. Variable so tests can shorten it.
+var phantomResultGrace = 60 * time.Second
+
+// isPhantomResult reports whether a result event terminates a synthetic turn
+// rather than the user's turn.
+//
+// Claude Code injects a synthetic user turn when it resumes a session whose
+// previous process died with background work still registered (the
+// "<task-notification> ... <status>stopped</status>" message). That turn ends
+// within ~1s with an empty result and no token usage while the user's real
+// turn is still being processed. Consuming it as the turn's result surfaces
+// "(empty response)" and strands the real answer as stale events.
+//
+// A real turn always reports usage — even a resumed one replays a cached
+// prompt worth thousands of cache_read tokens — so empty content plus zero
+// usage, no tools and no streamed text is a reliable fingerprint.
+func isPhantomResult(event Event, textParts []string, toolCount int) bool {
+	return event.Content == "" && len(textParts) == 0 && toolCount == 0 &&
+		event.InputTokens == 0 && event.CacheCreationTokens == 0 &&
+		event.CacheReadTokens == 0 && event.OutputTokens == 0
+}
+
 // processInteractiveEvents runs the event loop for a single turn. When the
 // turn ends with a retriable backend error (e.g. 429 rate_limit_error), it
 // returns the classified ErrorKind so the caller can decide whether to
@@ -2796,6 +2837,23 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	firstEventLogged := false
 	triggerAutoCompress := false
 	pendingSend := sendDone
+
+	// Phantom result state (see isPhantomResult). phantomEvent holds the
+	// ignored result so it can still be used if the grace window expires
+	// without any further activity.
+	var phantomEvent Event
+	var phantomTimer *time.Timer
+	var phantomCh <-chan time.Time
+	phantomExpired := false
+	disarmPhantom := func() {
+		phantomCh = nil
+		if phantomTimer != nil && !phantomTimer.Stop() {
+			select {
+			case <-phantomTimer.C:
+			default:
+			}
+		}
+	}
 
 	// stopTyping tracks the current turn's typing indicator so it can be
 	// stopped when a queued message starts a new turn.
@@ -2862,6 +2920,17 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if !ok {
 				goto channelClosed
 			}
+			// Real activity followed the phantom result — the turn is alive,
+			// so the phantom must never be resurrected by its timer.
+			disarmPhantom()
+		case <-phantomCh:
+			// Nothing followed the ignored result within the grace window;
+			// treat it as this turn's real result after all.
+			phantomCh = nil
+			phantomExpired = true
+			event = phantomEvent
+			slog.Warn("phantom result grace expired, accepting empty result",
+				"session_key", sessionKey, "grace", phantomResultGrace)
 		case err := <-pendingSend:
 			pendingSend = nil
 			if err != nil {
@@ -3173,6 +3242,24 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventResult:
+			// Ignore a synthetic turn's result and keep waiting for the real
+			// one, bounded by phantomResultGrace so a genuinely empty turn
+			// still completes.
+			if !phantomExpired && isPhantomResult(event, textParts, toolCount) &&
+				state.agentSession != nil && state.agentSession.Alive() {
+				phantomEvent = event
+				if phantomTimer == nil {
+					phantomTimer = time.NewTimer(phantomResultGrace)
+					defer phantomTimer.Stop()
+				} else {
+					phantomTimer.Reset(phantomResultGrace)
+				}
+				phantomCh = phantomTimer.C
+				slog.Warn("ignoring phantom result (empty content, zero usage)",
+					"session_key", sessionKey, "elapsed", time.Since(turnStart))
+				continue
+			}
+
 			// Compute turn stats early so compact progress card can include them.
 			turnDuration := time.Since(turnStart)
 			totalInput := event.InputTokens + event.CacheCreationTokens + event.CacheReadTokens
@@ -3450,6 +3537,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				segmentStart = 0
 				toolCount = 0
 				toolNames = nil
+				disarmPhantom()
+				phantomExpired = false
 				turnStart = time.Now()
 				firstEventLogged = false
 				waitStart = time.Now()
@@ -6426,7 +6515,7 @@ func sanitizeTelegramMenuCommand(cmd string) string {
 }
 
 func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
-	agent, sessions, interactiveKey, err := e.commandContext(p, msg)
+	agent, sessions, interactiveKey, workspace, err := e.commandContextWS(p, msg)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
 		return
@@ -6517,6 +6606,7 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChangeFailed, err))
 		return
 	}
+	e.persistWorkspaceModel(workspace, agent)
 	e.cleanupInteractiveState(interactiveKey)
 
 	s := sessions.GetOrCreateActive(msg.SessionKey)
@@ -6597,22 +6687,32 @@ func (e *Engine) switchModelOnAgent(agent Agent, target string, persistConfig bo
 		return target, nil
 	}
 
+	// modelSaveFunc writes config.toml's project-level default. Gate it on
+	// persistConfig: a workspace-scoped switch must stay in that workspace,
+	// otherwise picking a model in one channel silently redefines the default
+	// every *other* workspace falls back to when its agent is rebuilt.
+	saveDefault := func() error {
+		if !persistConfig || e.modelSaveFunc == nil {
+			return nil
+		}
+		if err := e.modelSaveFunc(target); err != nil {
+			return fmt.Errorf("save model: %w", err)
+		}
+		return nil
+	}
+
 	providerSwitcher, ok := agent.(ProviderSwitcher)
 	if !ok {
-		if e.modelSaveFunc != nil {
-			if err := e.modelSaveFunc(target); err != nil {
-				return "", fmt.Errorf("save model: %w", err)
-			}
+		if err := saveDefault(); err != nil {
+			return "", err
 		}
 		switcher.SetModel(target)
 		return target, nil
 	}
 	active := providerSwitcher.GetActiveProvider()
 	if active == nil {
-		if e.modelSaveFunc != nil {
-			if err := e.modelSaveFunc(target); err != nil {
-				return "", fmt.Errorf("save model: %w", err)
-			}
+		if err := saveDefault(); err != nil {
+			return "", err
 		}
 		switcher.SetModel(target)
 		return target, nil
@@ -6640,7 +6740,13 @@ func (e *Engine) switchModelOnAgent(agent Agent, target string, persistConfig bo
 }
 
 func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
-	switcher, ok := e.agent.(ReasoningEffortSwitcher)
+	agent, sessions, interactiveKey, workspace, err := e.commandContextWS(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
+	}
+
+	switcher, ok := agent.(ReasoningEffortSwitcher)
 	if !ok {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReasoningNotSupported))
 		return
@@ -6687,13 +6793,13 @@ func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 			e.replyWithButtons(p, msg.ReplyCtx, sb.String(), buttons)
 			return
 		}
-		e.replyWithCard(p, msg.ReplyCtx, e.renderReasoningCard())
+		e.replyWithCard(p, msg.ReplyCtx, e.renderReasoningCard(msg.SessionKey))
 		return
 	}
 
 	efforts := switcher.AvailableReasoningEfforts()
 	target := strings.ToLower(strings.TrimSpace(args[0]))
-	if idx, err := strconv.Atoi(target); err == nil && idx >= 1 && idx <= len(efforts) {
+	if idx, aerr := strconv.Atoi(target); aerr == nil && idx >= 1 && idx <= len(efforts) {
 		target = efforts[idx-1]
 	}
 
@@ -6710,12 +6816,13 @@ func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 	}
 
 	switcher.SetReasoningEffort(target)
-	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
+	e.persistWorkspaceModel(workspace, agent)
+	e.cleanupInteractiveState(interactiveKey)
 
-	s := e.sessions.GetOrCreateActive(msg.SessionKey)
+	s := sessions.GetOrCreateActive(msg.SessionKey)
 	s.SetAgentSessionID("", "")
 	s.ClearHistory()
-	e.sessions.Save()
+	sessions.Save()
 
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgReasoningChanged, target))
 }
@@ -6744,7 +6851,7 @@ func (e *Engine) matchesPresetName(content string) bool {
 // cmdPreset applies a named model+effort bundle. Presets compose the agent's
 // ModelSwitcher and ReasoningEffortSwitcher so one command switches both.
 func (e *Engine) cmdPreset(p Platform, msg *Message, args []string) {
-	agent, sessions, interactiveKey, err := e.commandContext(p, msg)
+	agent, sessions, interactiveKey, workspace, err := e.commandContextWS(p, msg)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
 		return
@@ -6828,6 +6935,7 @@ func (e *Engine) cmdPreset(p Platform, msg *Message, args []string) {
 		return
 	}
 	effortSwitcher.SetReasoningEffort(selected.Effort)
+	e.persistWorkspaceModel(workspace, agent)
 
 	e.cleanupInteractiveState(interactiveKey)
 	s := sessions.GetOrCreateActive(msg.SessionKey)
@@ -8570,7 +8678,7 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 	case "/model":
 		return e.renderModelCard(sessionKey)
 	case "/reasoning":
-		return e.renderReasoningCard()
+		return e.renderReasoningCard(sessionKey)
 	case "/mode":
 		return e.renderModeCard()
 	case "/lang":
@@ -8641,7 +8749,7 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 }
 
 func (e *Engine) handleModelCardAction(args, sessionKey string) *Card {
-	agent, sessions := e.sessionContextForKey(sessionKey)
+	agent, sessions, workspace := e.workspaceContextForKey(sessionKey)
 	switcher, ok := agent.(ModelSwitcher)
 	if !ok {
 		return e.simpleCard(e.i18n.T(MsgCardTitleModel), "indigo", e.i18n.T(MsgModelNotSupported))
@@ -8662,6 +8770,7 @@ func (e *Engine) handleModelCardAction(args, sessionKey string) *Card {
 	resolved, err := e.switchModelOnAgent(agent, target, agent == e.agent)
 	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(sessionKey))
 	if err == nil {
+		e.persistWorkspaceModel(workspace, agent)
 		s := sessions.GetOrCreateActive(sessionKey)
 		s.SetAgentSessionID("", "")
 		s.ClearHistory()
@@ -8679,7 +8788,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		if args == "" {
 			return
 		}
-		agent, sessions := e.sessionContextForKey(sessionKey)
+		agent, sessions, workspace := e.workspaceContextForKey(sessionKey)
 		switcher, ok := agent.(ModelSwitcher)
 		if !ok {
 			return
@@ -8708,13 +8817,14 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		state.mu.Lock()
 		state.modelSwitch = &modelSwitchState{phase: "switching", target: target}
 		state.mu.Unlock()
-		go e.performModelSwitchAsync(sessionKey, state, agent, sessions, target)
+		go e.performModelSwitchAsync(sessionKey, state, agent, sessions, workspace, target)
 
 	case "/reasoning":
 		if args == "" {
 			return
 		}
-		switcher, ok := e.agent.(ReasoningEffortSwitcher)
+		agent, sessions, workspace := e.workspaceContextForKey(sessionKey)
+		switcher, ok := agent.(ReasoningEffortSwitcher)
 		if !ok {
 			return
 		}
@@ -8726,12 +8836,13 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		for _, effort := range efforts {
 			if effort == target {
 				switcher.SetReasoningEffort(target)
+				e.persistWorkspaceModel(workspace, agent)
 				interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 				e.cleanupInteractiveState(interactiveKey)
-				s := e.sessions.GetOrCreateActive(sessionKey)
+				s := sessions.GetOrCreateActive(sessionKey)
 				s.SetAgentSessionID("", "")
 				s.ClearHistory()
-				e.sessions.Save()
+				sessions.Save()
 				return
 			}
 		}
@@ -9217,9 +9328,10 @@ func (e *Engine) pushDeleteModeResultCard(sessionKey string) {
 	e.sendWithCard(targetPlatform, rctx, card)
 }
 
-func (e *Engine) performModelSwitchAsync(sessionKey string, state *interactiveState, agent Agent, sessions *SessionManager, target string) {
+func (e *Engine) performModelSwitchAsync(sessionKey string, state *interactiveState, agent Agent, sessions *SessionManager, workspace, target string) {
 	resolved, err := e.switchModelOnAgent(agent, target, agent == e.agent)
 	if err == nil {
+		e.persistWorkspaceModel(workspace, agent)
 		s := sessions.GetOrCreateActive(sessionKey)
 		s.SetAgentSessionID("", "")
 		s.ClearHistory()
@@ -9517,8 +9629,13 @@ func (e *Engine) renderModelSwitchResultCard(target string, err error) *Card {
 		Build()
 }
 
-func (e *Engine) renderReasoningCard() *Card {
-	switcher, ok := e.agent.(ReasoningEffortSwitcher)
+func (e *Engine) renderReasoningCard(sessionKey string) *Card {
+	agent := e.agent
+	if sessionKey != "" {
+		agent, _ = e.sessionContextForKey(sessionKey)
+	}
+
+	switcher, ok := agent.(ReasoningEffortSwitcher)
 	if !ok {
 		return e.simpleCard(e.i18n.T(MsgCardTitleReasoning), "orange", e.i18n.T(MsgReasoningNotSupported))
 	}
@@ -11994,7 +12111,50 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 	}
 
 	var textParts []string
-	for event := range agentSession.Events() {
+	events := agentSession.Events()
+
+	// Phantom result handling, as in processInteractiveEvents: a resumed
+	// session may replay a synthetic turn whose empty result would otherwise
+	// be relayed back as "(empty response)".
+	var phantomEvent Event
+	var phantomTimer *time.Timer
+	var phantomCh <-chan time.Time
+	phantomExpired := false
+	defer func() {
+		if phantomTimer != nil {
+			phantomTimer.Stop()
+		}
+	}()
+
+relayLoop:
+	for {
+		var event Event
+		var ok bool
+		select {
+		case event, ok = <-events:
+			if !ok {
+				break relayLoop
+			}
+			phantomCh = nil
+			if phantomTimer != nil && !phantomTimer.Stop() {
+				select {
+				case <-phantomTimer.C:
+				default:
+				}
+			}
+		case <-phantomCh:
+			phantomCh = nil
+			phantomExpired = true
+			event = phantomEvent
+			slog.Warn("relay: phantom result grace expired, accepting empty result",
+				"from", fromProject, "to", e.name)
+		case <-ctx.Done():
+			// Relay deadline fired while waiting. Same handling as the
+			// per-iteration check below.
+			go e.drainRelaySession(agentSession, session, relaySessionKey)
+			return relayPartialResponseOrError(ctx.Err(), textParts, fromProject, e.name)
+		}
+
 		switch event.Type {
 		case EventText:
 			if event.Content != "" {
@@ -12022,6 +12182,18 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 				textParts = append(textParts, fmt.Sprintf(e.i18n.T(MsgToolResult), tn, out)+"\n\n")
 			}
 		case EventResult:
+			if !phantomExpired && isPhantomResult(event, textParts, 0) && agentSession.Alive() {
+				phantomEvent = event
+				if phantomTimer == nil {
+					phantomTimer = time.NewTimer(phantomResultGrace)
+				} else {
+					phantomTimer.Reset(phantomResultGrace)
+				}
+				phantomCh = phantomTimer.C
+				slog.Warn("relay: ignoring phantom result (empty content, zero usage)",
+					"from", fromProject, "to", e.name)
+				continue
+			}
 			// Use agentSession.CurrentSessionID() for the same reason as above.
 			if currentID := agentSession.CurrentSessionID(); currentID != "" {
 				if session.CompareAndSetAgentSessionID(currentID, e.agent.Name()) {
@@ -12409,44 +12581,82 @@ func effectiveWorkspaceChannelKey(msg *Message) string {
 // commandContext resolves the appropriate agent, session manager, and interactive key
 // for a command. In multi-workspace mode, it routes to the bound workspace if present.
 func (e *Engine) commandContext(p Platform, msg *Message) (Agent, *SessionManager, string, error) {
+	agent, sessions, interactiveKey, _, err := e.commandContextWS(p, msg)
+	return agent, sessions, interactiveKey, err
+}
+
+// commandContextWS is commandContext plus the workspace directory the returned
+// agent is keyed by. The directory is empty when the command falls back to the
+// project-level agent, i.e. when there is nothing workspace-scoped to persist.
+func (e *Engine) commandContextWS(p Platform, msg *Message) (Agent, *SessionManager, string, string, error) {
 	if !e.multiWorkspace {
-		return e.agent, e.sessions, msg.SessionKey, nil
+		return e.agent, e.sessions, msg.SessionKey, "", nil
 	}
 	channelID := effectiveChannelID(msg)
 	channelKey := effectiveWorkspaceChannelKey(msg)
 	if channelKey == "" || channelID == "" {
-		return e.agent, e.sessions, msg.SessionKey, nil
+		return e.agent, e.sessions, msg.SessionKey, "", nil
 	}
 	workspace, _, err := e.resolveWorkspace(p, channelID)
 	if err != nil {
-		return nil, nil, "", err
+		return nil, nil, "", "", err
 	}
 	if workspace == "" {
-		return e.agent, e.sessions, msg.SessionKey, nil
+		return e.agent, e.sessions, msg.SessionKey, "", nil
 	}
-	agent, sessions, interactiveKey, _, err := e.workspaceContext(workspace, msg.SessionKey)
+	agent, sessions, interactiveKey, effectiveDir, err := e.workspaceContext(workspace, msg.SessionKey)
 	if err != nil {
-		return nil, nil, "", err
+		return nil, nil, "", "", err
 	}
-	return agent, sessions, interactiveKey, nil
+	return agent, sessions, interactiveKey, effectiveDir, nil
+}
+
+// persistWorkspaceModel records the agent's current model and reasoning effort
+// as the workspace's sticky selection. A no-op for the project-level agent,
+// whose model is already persisted to config.toml by switchModelOnAgent.
+func (e *Engine) persistWorkspaceModel(workspace string, agent Agent) {
+	if workspace == "" || agent == nil || agent == e.agent || e.projectState == nil {
+		return
+	}
+	var pref WorkspaceModelPref
+	if ms, ok := agent.(ModelSwitcher); ok {
+		pref.Model = ms.GetModel()
+	}
+	if es, ok := agent.(ReasoningEffortSwitcher); ok {
+		pref.Effort = es.GetReasoningEffort()
+	}
+	e.projectState.SetWorkspaceModel(workspace, pref)
+	e.projectState.Save()
+	slog.Info("workspace model selection persisted",
+		"workspace", workspace, "model", pref.Model, "effort", pref.Effort)
 }
 
 // sessionContextForKey resolves the agent and session manager for a sessionKey.
 // It uses existing workspace bindings and falls back to global context if unresolved.
 func (e *Engine) sessionContextForKey(sessionKey string) (Agent, *SessionManager) {
+	agent, sessions, _ := e.workspaceContextForKey(sessionKey)
+	return agent, sessions
+}
+
+// workspaceContextForKey is sessionContextForKey plus the workspace directory
+// the returned agent is keyed by (empty when falling back to the project-level
+// agent). It routes through workspaceContext so the per-channel work-dir
+// override from /cd is honoured — the same agent the command path resolves.
+func (e *Engine) workspaceContextForKey(sessionKey string) (Agent, *SessionManager, string) {
 	if !e.multiWorkspace || e.workspaceBindings == nil {
-		return e.agent, e.sessions
+		return e.agent, e.sessions, ""
 	}
 	channelKey := extractWorkspaceChannelKey(sessionKey)
 	if channelKey == "" {
-		return e.agent, e.sessions
+		return e.agent, e.sessions, ""
 	}
 	if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); usable {
-		if wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(normalizeWorkspacePath(b.Workspace)); err == nil {
-			return wsAgent, wsSessions
+		wsAgent, wsSessions, _, effectiveDir, err := e.workspaceContext(normalizeWorkspacePath(b.Workspace), sessionKey)
+		if err == nil {
+			return wsAgent, wsSessions, effectiveDir
 		}
 	}
-	return e.agent, e.sessions
+	return e.agent, e.sessions, ""
 }
 
 // interactiveKeyForSessionKey returns the interactive state key for a sessionKey.

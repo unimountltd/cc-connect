@@ -12,7 +12,21 @@ type projectStateData struct {
 	WorkDirOverride       string            `json:"work_dir_override,omitempty"`
 	WorkspaceDirOverrides map[string]string `json:"workspace_dir_overrides,omitempty"`
 	InjectPrompts         map[string]string `json:"inject_prompts,omitempty"` // channelID → custom prompt
+	// WorkspaceModels maps a workspace directory to the model/effort last
+	// selected for it via /model, /preset or /reasoning. Per-workspace agents
+	// are recreated on idle reap and on daemon restart; without this the
+	// selection silently reverts to the project-level config default.
+	WorkspaceModels map[string]WorkspaceModelPref `json:"workspace_models,omitempty"`
 }
+
+// WorkspaceModelPref is a per-workspace model selection. Empty fields mean
+// "inherit the project-level default".
+type WorkspaceModelPref struct {
+	Model  string `json:"model,omitempty"`
+	Effort string `json:"effort,omitempty"`
+}
+
+func (p WorkspaceModelPref) isZero() bool { return p.Model == "" && p.Effort == "" }
 
 // ProjectStateStore persists lightweight runtime state for one project.
 type ProjectStateStore struct {
@@ -73,6 +87,45 @@ func (ps *ProjectStateStore) ClearWorkspaceDirOverride(workspace string) {
 
 func (ps *ProjectStateStore) ClearWorkDirOverride() {
 	ps.SetWorkDirOverride("")
+}
+
+// WorkspaceModel returns the persisted model selection for a workspace
+// directory. The bool reports whether any selection is stored.
+func (ps *ProjectStateStore) WorkspaceModel(workspace string) (WorkspaceModelPref, bool) {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	if ps.state.WorkspaceModels == nil {
+		return WorkspaceModelPref{}, false
+	}
+	pref, ok := ps.state.WorkspaceModels[workspace]
+	return pref, ok
+}
+
+// SetWorkspaceModel records the model selection for a workspace directory.
+// An all-empty pref clears the entry so the project default applies again.
+func (ps *ProjectStateStore) SetWorkspaceModel(workspace string, pref WorkspaceModelPref) {
+	if pref.isZero() {
+		ps.ClearWorkspaceModel(workspace)
+		return
+	}
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.state.WorkspaceModels == nil {
+		ps.state.WorkspaceModels = make(map[string]WorkspaceModelPref)
+	}
+	ps.state.WorkspaceModels[workspace] = pref
+}
+
+func (ps *ProjectStateStore) ClearWorkspaceModel(workspace string) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.state.WorkspaceModels == nil {
+		return
+	}
+	delete(ps.state.WorkspaceModels, workspace)
+	if len(ps.state.WorkspaceModels) == 0 {
+		ps.state.WorkspaceModels = nil
+	}
 }
 
 func (ps *ProjectStateStore) GetInjectPrompt(channelID string) string {
