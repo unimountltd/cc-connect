@@ -1,13 +1,94 @@
 package slack
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	slackapi "github.com/slack-go/slack"
 	"github.com/slack-go/slack/slackevents"
 )
+
+// Regression: reaction cleanup used to run synchronously after the final
+// reply. If Slack's reactions.remove request stalled, the engine could not
+// release the session lock and every later message was queued as busy.
+func TestStartTyping_StopDoesNotBlockOnSlackReactionCleanup(t *testing.T) {
+	removeStarted := make(chan struct{})
+	releaseRemove := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/reactions.add":
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		case "/reactions.remove":
+			close(removeStarted)
+			select {
+			case <-releaseRemove:
+			case <-r.Context().Done():
+			}
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	p := &Platform{client: slackapi.New("xoxb-test", slackapi.OptionAPIURL(server.URL+"/"))}
+	stop := p.StartTyping(context.Background(), replyContext{channel: "C1", messageTS: "1.000001"})
+
+	returned := make(chan struct{})
+	go func() {
+		stop()
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("stop typing blocked on Slack reaction cleanup")
+	}
+
+	select {
+	case <-removeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("reaction cleanup did not start")
+	}
+	close(releaseRemove)
+}
+
+func TestReactCompletionDoesNotBlockOnSlackAPI(t *testing.T) {
+	requestStarted := make(chan struct{})
+	releaseRequest := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(requestStarted)
+		select {
+		case <-releaseRequest:
+		case <-r.Context().Done():
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+
+	p := &Platform{client: slackapi.New("xoxb-test", slackapi.OptionAPIURL(server.URL+"/"))}
+	returned := make(chan struct{})
+	go func() {
+		p.ReactCompletion(context.Background(), replyContext{channel: "C1", messageTS: "1.000001"}, true)
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("completion reaction blocked turn completion")
+	}
+
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("completion reaction request did not start")
+	}
+	close(releaseRequest)
+}
 
 func TestAssistantOrThreadTS(t *testing.T) {
 	cases := []struct {

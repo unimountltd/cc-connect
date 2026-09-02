@@ -692,7 +692,9 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 	var added []string
 
 	addReaction := func(emoji string) {
-		if err := p.client.AddReaction(emoji, ref); err != nil {
+		reactionCtx, cancel := context.WithTimeout(ctx, slackReactionRequestTimeout)
+		defer cancel()
+		if err := p.client.AddReactionContext(reactionCtx, emoji, ref); err != nil {
 			slog.Debug("slack: add reaction failed", "emoji", emoji, "error", err)
 			return
 		}
@@ -743,34 +745,51 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 		}
 	}()
 
+	var stopOnce sync.Once
 	return func() {
-		close(done)
-		wg.Wait()
-		mu.Lock()
-		emojis := make([]string, len(added))
-		copy(emojis, added)
-		mu.Unlock()
-		for _, emoji := range emojis {
-			if err := p.client.RemoveReaction(emoji, ref); err != nil {
-				slog.Debug("slack: remove reaction failed", "emoji", emoji, "error", err)
-			}
-		}
+		stopOnce.Do(func() {
+			close(done)
+
+			// Reaction cleanup is cosmetic and must never delay releasing the
+			// engine's session lock. In particular, slack-go's legacy
+			// RemoveReaction uses context.Background and can wait forever when
+			// Slack's API or the network stalls. Finish the cleanup out of band
+			// with a bounded request context instead.
+			go func() {
+				wg.Wait()
+				mu.Lock()
+				emojis := append([]string(nil), added...)
+				mu.Unlock()
+				for _, emoji := range emojis {
+					cleanupCtx, cancel := context.WithTimeout(context.Background(), slackReactionRequestTimeout)
+					err := p.client.RemoveReactionContext(cleanupCtx, emoji, ref)
+					cancel()
+					if err != nil {
+						slog.Debug("slack: remove reaction failed", "emoji", emoji, "error", err)
+					}
+				}
+			}()
+		})
 	}
 }
 
+const slackReactionRequestTimeout = 5 * time.Second
+
 // AddReaction adds an emoji reaction to the user's message.
-func (p *Platform) AddReaction(_ context.Context, rctx any, emoji string) error {
+func (p *Platform) AddReaction(ctx context.Context, rctx any, emoji string) error {
 	rc, ok := rctx.(replyContext)
 	if !ok || rc.channel == "" || rc.messageTS == "" {
 		return fmt.Errorf("slack: invalid reply context for reaction")
 	}
 	ref := slack.ItemRef{Channel: rc.channel, Timestamp: rc.messageTS}
-	return p.client.AddReaction(emoji, ref)
+	reactionCtx, cancel := context.WithTimeout(ctx, slackReactionRequestTimeout)
+	defer cancel()
+	return p.client.AddReactionContext(reactionCtx, emoji, ref)
 }
 
 // ReactCompletion adds a persistent emoji reaction indicating the outcome of
 // a turn: checkered_flag for success, woman-raising-hand for problems.
-func (p *Platform) ReactCompletion(_ context.Context, rctx any, success bool) {
+func (p *Platform) ReactCompletion(ctx context.Context, rctx any, success bool) {
 	rc, ok := rctx.(replyContext)
 	if !ok || rc.channel == "" || rc.messageTS == "" {
 		return
@@ -780,9 +799,15 @@ func (p *Platform) ReactCompletion(_ context.Context, rctx any, success bool) {
 	if !success {
 		emoji = "woman-raising-hand::skin-tone-2"
 	}
-	if err := p.client.AddReaction(emoji, ref); err != nil {
-		slog.Debug("slack: completion reaction failed", "emoji", emoji, "error", err)
-	}
+	// Completion reactions are best-effort UI. Run them out of band so a
+	// stalled Slack API cannot keep the completed turn's session lock held.
+	go func() {
+		reactionCtx, cancel := context.WithTimeout(ctx, slackReactionRequestTimeout)
+		defer cancel()
+		if err := p.client.AddReactionContext(reactionCtx, emoji, ref); err != nil {
+			slog.Debug("slack: completion reaction failed", "emoji", emoji, "error", err)
+		}
+	}()
 }
 
 func (p *Platform) Stop() error {
