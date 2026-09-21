@@ -429,3 +429,94 @@ func TestDedupKey(t *testing.T) {
 		t.Errorf("dedupKey with empty ts = %q, want empty", got)
 	}
 }
+
+// Slack Connect (externally shared) channels deliver file objects in events as
+// bare stubs — only an id, no name or url_private*. The platform must hydrate
+// the stub via files.info instead of dropping the attachment.
+func TestProcessSlackFileShares_HydratesStubViaFilesInfo(t *testing.T) {
+	var srv *httptest.Server
+	filesInfoCalls := 0
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/files.info":
+			filesInfoCalls++
+			if err := r.ParseForm(); err != nil {
+				t.Fatalf("ParseForm: %v", err)
+			}
+			if got := r.FormValue("file"); got != "F0C38BXDY7P" {
+				t.Errorf("files.info file=%q, want F0C38BXDY7P", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok": true,
+				"file": map[string]any{
+					"id":                   "F0C38BXDY7P",
+					"name":                 "HEDUNO-HANDOVER.md",
+					"title":                "HEDUNO-HANDOVER.md",
+					"mimetype":             "text/plain",
+					"filetype":             "markdown",
+					"mode":                 "snippet",
+					"file_access":          "visible",
+					"url_private_download": srv.URL + "/download/heduno-handover.md",
+				},
+			})
+		case "/download/heduno-handover.md":
+			if r.Header.Get("Authorization") != "Bearer xoxb-test" {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = w.Write([]byte("# Handover\n"))
+		default:
+			t.Errorf("unexpected slack API path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		botToken: "xoxb-test",
+		client:   slackapi.New("xoxb-test", slackapi.OptionAPIURL(srv.URL+"/")),
+	}
+
+	stub := []slackevents.File{{ID: "F0C38BXDY7P", FileAccess: "check_file_info"}}
+	images, audio, docs := p.processSlackFileShares(stub)
+
+	if filesInfoCalls != 1 {
+		t.Fatalf("files.info calls = %d, want 1", filesInfoCalls)
+	}
+	if len(images) != 0 || audio != nil {
+		t.Fatalf("unexpected image/audio attachments: %d images, audio=%v", len(images), audio != nil)
+	}
+	if len(docs) != 1 {
+		t.Fatalf("doc attachments = %d, want 1", len(docs))
+	}
+	if docs[0].FileName != "HEDUNO-HANDOVER.md" {
+		t.Errorf("FileName = %q, want HEDUNO-HANDOVER.md", docs[0].FileName)
+	}
+	if docs[0].MimeType != "text/plain" {
+		t.Errorf("MimeType = %q, want text/plain", docs[0].MimeType)
+	}
+	if string(docs[0].Data) != "# Handover\n" {
+		t.Errorf("Data = %q", docs[0].Data)
+	}
+}
+
+// A stub that files.info cannot resolve (e.g. the originating org denies
+// access) is dropped without panicking and without producing attachments.
+func TestProcessSlackFileShares_StubUnresolvableIsDropped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "file_not_found"})
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		botToken: "xoxb-test",
+		client:   slackapi.New("xoxb-test", slackapi.OptionAPIURL(srv.URL+"/")),
+	}
+	images, audio, docs := p.processSlackFileShares([]slackevents.File{{ID: "F_DENIED"}})
+	if len(images) != 0 || audio != nil || len(docs) != 0 {
+		t.Fatalf("expected no attachments, got %d images, audio=%v, %d docs", len(images), audio != nil, len(docs))
+	}
+}

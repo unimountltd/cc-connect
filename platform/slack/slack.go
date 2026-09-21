@@ -391,13 +391,24 @@ func parseSlackInnerEventFiles(raw *json.RawMessage) []slackevents.File {
 // so the engine can persist them and pass paths to the agent.
 func (p *Platform) processSlackFileShares(files []slackevents.File) (images []core.ImageAttachment, audio *core.AudioAttachment, docFiles []core.FileAttachment) {
 	for _, f := range files {
-		fileURL := f.URLPrivateDownload
+		fileURL := slackFileURL(f)
 		if fileURL == "" {
-			fileURL = f.URLPrivate
-		}
-		if fileURL == "" {
-			slog.Warn("slack: file has no download URL", "file_id", f.ID, "name", f.Name)
-			continue
+			// Slack Connect (externally shared) channels deliver file objects
+			// as bare stubs — just an id, with file_access "check_file_info" —
+			// and expect the app to hydrate them via files.info.
+			hydrated, err := p.hydrateSlackFile(f.ID)
+			if err != nil {
+				slog.Warn("slack: file has no download URL", "file_id", f.ID, "name", f.Name,
+					"file_access", f.FileAccess, "error", err)
+				continue
+			}
+			f = hydrated
+			fileURL = slackFileURL(f)
+			if fileURL == "" {
+				slog.Warn("slack: file has no download URL after files.info", "file_id", f.ID,
+					"name", f.Name, "file_access", f.FileAccess)
+				continue
+			}
 		}
 
 		mt := strings.TrimSpace(strings.ToLower(f.Mimetype))
@@ -445,6 +456,45 @@ func (p *Platform) processSlackFileShares(files []slackevents.File) (images []co
 		}
 	}
 	return images, audio, docFiles
+}
+
+// slackFileURL returns the best download URL carried by a file object, or "".
+func slackFileURL(f slackevents.File) string {
+	if f.URLPrivateDownload != "" {
+		return f.URLPrivateDownload
+	}
+	return f.URLPrivate
+}
+
+// hydrateSlackFile fetches full file metadata via files.info for a file that
+// arrived in an event as a stub (no name/URL). Only the fields used by
+// processSlackFileShares are mapped onto the slackevents.File shape.
+func (p *Platform) hydrateSlackFile(fileID string) (slackevents.File, error) {
+	if fileID == "" {
+		return slackevents.File{}, fmt.Errorf("empty file id")
+	}
+	if p.client == nil {
+		return slackevents.File{}, fmt.Errorf("slack client not initialised")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	info, _, _, err := p.client.GetFileInfoContext(ctx, fileID, 0, 0)
+	if err != nil {
+		return slackevents.File{}, fmt.Errorf("files.info: %w", err)
+	}
+	if info == nil {
+		return slackevents.File{}, fmt.Errorf("files.info: empty response")
+	}
+	return slackevents.File{
+		ID:                 info.ID,
+		Name:               info.Name,
+		Title:              info.Title,
+		Mimetype:           info.Mimetype,
+		Filetype:           info.Filetype,
+		Mode:               info.Mode,
+		URLPrivate:         info.URLPrivate,
+		URLPrivateDownload: info.URLPrivateDownload,
+	}, nil
 }
 
 func slackFileDisplayName(f slackevents.File) string {
