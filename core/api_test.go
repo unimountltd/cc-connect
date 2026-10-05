@@ -396,7 +396,7 @@ func TestHandleCronExec_TriggersJob(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if len(platform.getSent()) >= 2 {
+		if len(platform.getSent()) >= 2 && cronJobMarkedRun(store, job.ID) {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -451,12 +451,27 @@ func TestHandleCronExec_RunAliasRouteTriggersJob(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if len(platform.getSent()) >= 2 {
+		if len(platform.getSent()) >= 2 && cronJobMarkedRun(store, job.ID) {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for local api alias trigger, sent=%v", platform.getSent())
+}
+
+// cronJobMarkedRun reports whether the scheduler has recorded the job's run.
+// MarkRun saves the store under the same lock, so once LastRun is set the
+// job goroutine is done writing to the cron dir and t.TempDir cleanup won't
+// race with it.
+func cronJobMarkedRun(store *CronStore, id string) bool {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	for _, j := range store.jobs {
+		if j.ID == id {
+			return !j.LastRun.IsZero()
+		}
+	}
+	return false
 }
 
 func TestHandleCronExec_ProjectMissingIsBadRequest(t *testing.T) {
