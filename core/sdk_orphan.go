@@ -255,6 +255,15 @@ func buildOrphanRender(turn *orphanTurn, errOpt error) string {
 	if errOpt != nil {
 		return header + "\n_failed: " + errOpt.Error() + "_"
 	}
+	// Honor NO_REPLY like a normal turn: a bare marker means the agent chose
+	// silence (common for idle wakeups), so render nothing — not even the
+	// header. A trailing marker after real text is stripped.
+	if isSilentReply(body) {
+		return ""
+	}
+	if stripped, ok := stripTrailingSilent(body); ok {
+		body = stripped
+	}
 	if body == "" {
 		// Tool-only turn with no text response; still let the user know the
 		// model woke up so context divergence is visible.

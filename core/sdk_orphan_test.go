@@ -298,6 +298,21 @@ func TestBuildOrphanRender_HeaderShape(t *testing.T) {
 			wantNone: true,
 		},
 		{
+			name:     "bare NO_REPLY is silent",
+			turn:     &orphanTurn{text: []string{"NO_REPLY"}},
+			wantNone: true,
+		},
+		{
+			name:     "bare NO_REPLY after tools is silent",
+			turn:     &orphanTurn{text: []string{"\nno_reply\n"}, toolCount: 2},
+			wantNone: true,
+		},
+		{
+			name: "trailing NO_REPLY stripped",
+			turn: &orphanTurn{text: []string{"nothing new\nNO_REPLY"}},
+			want: "💤 *Scheduled wakeup*\nnothing new",
+		},
+		{
 			name: "error",
 			turn: &orphanTurn{},
 			err:  errors.New("boom"),
