@@ -382,6 +382,7 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 	// MCP grandchildren (e.g. the Telegram bridge bun process) spinning at
 	// 100% CPU after their parent's stdio pipe closes.
 	prepareCmdForKill(cmd)
+	installGroupCancel(cmd)
 	// Filter out CLAUDECODE env var to prevent "nested session" detection,
 	// since cc-connect is a bridge, not a nested Claude Code session.
 	env := filterEnv(os.Environ(), "CLAUDECODE")
@@ -523,7 +524,14 @@ func (cs *claudeSession) startReadLoopWait(stdout io.ReadCloser) (<-chan error, 
 	waitDone := make(chan struct{})
 
 	go func() {
-		waitErrCh <- cs.cmd.Wait()
+		err := cs.cmd.Wait()
+		// The child is reaped; anything left in its process group is an MCP
+		// server (or something an MCP server spawned) that outlived it. Kill
+		// it now so idle close, eviction and shutdown never leak helpers.
+		if sweepErr := sweepProcessGroup(cs.cmd); sweepErr != nil {
+			slog.Debug("claudeSession: sweep process group", "error", sweepErr)
+		}
+		waitErrCh <- err
 		close(waitDone)
 	}()
 

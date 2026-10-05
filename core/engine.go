@@ -419,10 +419,14 @@ type Engine struct {
 	// 同时保留已保存的 session ID，便于下次继续恢复。
 	agentSessionIdleTimeoutNanos atomic.Int64
 	agentSessionIdleSeq          atomic.Uint64
-	maxQueuedMessages            int
-	dirHistory                   *DirHistory
-	baseWorkDir                  string
-	projectState                 *ProjectStateStore
+	// Live-session cap (see core/live_sessions.go). liveLimiter is shared by
+	// every engine in the instance; maxLiveSessions is this project's own cap.
+	liveLimiter       *LiveSessionLimiter
+	maxLiveSessions   atomic.Int64
+	maxQueuedMessages int
+	dirHistory        *DirHistory
+	baseWorkDir       string
+	projectState      *ProjectStateStore
 
 	// Auto-compress settings
 	autoCompressEnabled   bool
@@ -576,6 +580,13 @@ type interactiveState struct {
 	// agentSessionIdleCancel 取消当前会话的 idle 关闭计时器。
 	agentSessionIdleCancel context.CancelFunc
 	agentSessionIdleToken  uint64
+
+	// lastActivity is when this session last started or finished a turn;
+	// the live-session cap evicts the least recently active idle session.
+	// turnsInFlight counts foreground + unsolicited turns currently running
+	// so eviction and idle close never take down a busy session.
+	lastActivity  time.Time
+	turnsInFlight int
 
 	// eventsNeedResync is true when buffered events should be drained before
 	// the next turn (e.g. after an abnormal exit). Defaults to true (safe);
@@ -3882,6 +3893,8 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		return
 	}
 	e.cancelAgentSessionIdleClose(state)
+	beginStateTurn(state)
+	defer endStateTurn(state)
 
 	if workspaceDir != "" && e.workspacePool != nil {
 		ws := e.workspacePool.GetOrCreate(workspaceDir)
@@ -4228,6 +4241,29 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	// while the first one is still alive and writing to the same transcript.
 	closeSettled := e.awaitSessionClose(sessionKey)
 
+	// Live-session cap: evict the least recently used idle session (possibly
+	// in another project) or wait for a slot before spawning another process.
+	// Must run before taking interactiveMu — eviction needs that lock.
+	if !e.reserveLiveSessionSlot(e.ctx, sessionKey, p, replyCtx) {
+		slog.Error("no live session slot available, not starting agent session", "session_key", sessionKey)
+		if p != nil {
+			e.send(p, replyCtx, e.i18n.T(MsgSessionSlotUnavailable))
+		}
+		e.interactiveMu.Lock()
+		defer e.interactiveMu.Unlock()
+		if existing, ok := e.interactiveStates[sessionKey]; ok && existing.agentSession != nil && existing.agentSession.Alive() {
+			return existing
+		}
+		placeholderAgent := e.agent
+		if agentOverride != nil {
+			placeholderAgent = agentOverride
+		}
+		newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: placeholderAgent, eventsNeedResync: true}
+		adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
+		e.interactiveStates[sessionKey] = newState
+		return newState
+	}
+
 	e.interactiveMu.Lock()
 	defer e.interactiveMu.Unlock()
 
@@ -4428,6 +4464,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		replyCtx:         replyCtx,
 		agent:            agent,
 		eventsNeedResync: true,
+		lastActivity:     time.Now(),
 	}
 	adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
 	state = newState
@@ -4586,11 +4623,21 @@ func (e *Engine) scheduleAgentSessionIdleClose(sessionKey string, state *interac
 }
 
 func (e *Engine) cleanupInteractiveStateForIdleToken(sessionKey string, expected *interactiveState, token uint64, timeout time.Duration) {
+	e.closeIdleInteractiveState(sessionKey, expected, token, "idle", timeout)
+}
+
+// closeIdleInteractiveState closes the live agent process behind sessionKey
+// while keeping its saved agent session ID, so the next message resumes the
+// conversation. reason is "idle" (timer fired) or "evicted" (live-session cap).
+// It refuses — returning false — when the state was replaced, the idle token
+// is stale, or the session is busy in any way (turn running, permission
+// pending, messages queued, events needing resync).
+func (e *Engine) closeIdleInteractiveState(sessionKey string, expected *interactiveState, token uint64, reason string, timeout time.Duration) bool {
 	e.interactiveMu.Lock()
 	state, ok := e.interactiveStates[sessionKey]
 	if !ok || state == nil || state != expected {
 		e.interactiveMu.Unlock()
-		return
+		return false
 	}
 
 	var agentSession AgentSession
@@ -4599,24 +4646,27 @@ func (e *Engine) cleanupInteractiveStateForIdleToken(sessionKey string, expected
 		state.agentSession == nil ||
 		!state.agentSession.Alive() ||
 		state.stopped ||
-		state.eventsNeedResync ||
-		state.pending != nil ||
-		len(state.pendingMessages) > 0 {
+		e.stateIsBusyLocked(state) {
 		state.mu.Unlock()
 		e.interactiveMu.Unlock()
-		return
+		return false
 	}
 	agentSession = state.agentSession
 	state.agentSession = nil
+	idleCancel := state.agentSessionIdleCancel
 	state.agentSessionIdleCancel = nil
 	state.agentSessionIdleToken = 0
 	closePlatform := state.platform
 	closeReplyCtx := state.replyCtx
+	idleFor := time.Since(state.lastActivity)
 	state.mu.Unlock()
 	e.interactiveMu.Unlock()
+	if idleCancel != nil {
+		idleCancel()
+	}
 
-	slog.Info("agent session idle timeout: closing live agent session",
-		"session_key", sessionKey, "timeout", timeout)
+	slog.Info("closing live agent session",
+		"session_key", sessionKey, "reason", reason, "idle_for", idleFor.Round(time.Second), "idle_timeout", timeout)
 	e.stopUnsolicitedReader(state)
 	state.markStopped()
 
@@ -4636,6 +4686,7 @@ func (e *Engine) cleanupInteractiveStateForIdleToken(sessionKey string, expected
 		delete(e.interactiveStates, sessionKey)
 	}
 	e.interactiveMu.Unlock()
+	return true
 }
 
 // beginSessionClose registers an in-flight teardown for sessionKey and returns
@@ -4973,6 +5024,7 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 	var turnActive bool // true after first event, cleared on EventResult
 	defer func() {
 		if turnActive {
+			endStateTurn(state)
 			if workspaceDir != "" && e.workspacePool != nil {
 				if ws := e.workspacePool.Get(workspaceDir); ws != nil {
 					ws.EndTurn()
@@ -5030,6 +5082,7 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 			// Mark workspace active on first event.
 			if !turnActive {
 				turnActive = true
+				beginStateTurn(state)
 				if workspaceDir != "" && e.workspacePool != nil {
 					if ws := e.workspacePool.Get(workspaceDir); ws != nil {
 						ws.BeginTurn()
@@ -5093,6 +5146,7 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				textParts = nil
 				toolsUsed = nil
 				turnActive = false
+				endStateTurn(state)
 				if workspaceDir != "" && e.workspacePool != nil {
 					if ws := e.workspacePool.Get(workspaceDir); ws != nil {
 						ws.EndTurn()

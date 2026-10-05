@@ -107,6 +107,7 @@ type Config struct {
 	Relay              RelayConfig             `toml:"relay"`               // bot-to-bot relay behavior
 	Cron               CronConfig              `toml:"cron"`
 	Queue              QueueConfig             `toml:"queue"`
+	Sessions           SessionsConfig          `toml:"sessions"` // live agent process cap + idle close defaults
 	Webhook            WebhookConfig           `toml:"webhook"`
 	Bridge             BridgeConfig            `toml:"bridge"`
 	Management         ManagementConfig        `toml:"management"`
@@ -146,6 +147,59 @@ type CronConfig struct {
 // QueueConfig controls the per-session message queue.
 type QueueConfig struct {
 	MaxDepth *int `toml:"max_depth"` // max queued messages per session; default 5
+}
+
+// SessionsConfig bounds how many live agent processes this cc-connect instance
+// keeps around. Each session key (e.g. each Slack channel with
+// share_session_in_channel) owns one agent process plus its MCP servers, so
+// idle sessions hold hundreds of MB each until closed. Closing keeps the saved
+// agent session ID; the next message resumes the conversation.
+type SessionsConfig struct {
+	// MaxLive caps live agent processes across all projects. When a new
+	// session needs a process and the cap is reached, the least recently used
+	// idle session is closed first. nil → DefaultMaxLiveSessions; 0 = unlimited.
+	MaxLive *int `toml:"max_live"`
+	// IdleTimeoutMins closes a live agent process that has finished its last
+	// turn this many minutes ago. Per-project agent_session_idle_timeout_mins
+	// overrides it. nil → DefaultAgentSessionIdleTimeoutMins; 0 = never.
+	IdleTimeoutMins *int `toml:"idle_timeout_mins"`
+}
+
+// Defaults for [sessions]. Set the field to 0 explicitly to get the old
+// "never close anything" behaviour.
+const (
+	DefaultMaxLiveSessions             = 3
+	DefaultAgentSessionIdleTimeoutMins = 24 * 60
+)
+
+// EffectiveMaxLiveSessions resolves [sessions].max_live (0 = unlimited).
+func EffectiveMaxLiveSessions(cfg *Config) int {
+	if cfg != nil && cfg.Sessions.MaxLive != nil {
+		if *cfg.Sessions.MaxLive < 0 {
+			return 0
+		}
+		return *cfg.Sessions.MaxLive
+	}
+	return DefaultMaxLiveSessions
+}
+
+// EffectiveAgentSessionIdleTimeoutMins resolves the idle close timeout for a
+// project: [projects].agent_session_idle_timeout_mins beats
+// [sessions].idle_timeout_mins beats the default. 0 = never.
+func EffectiveAgentSessionIdleTimeoutMins(cfg *Config, proj *ProjectConfig) int {
+	if proj != nil && proj.AgentSessionIdleTimeoutMins != nil {
+		if *proj.AgentSessionIdleTimeoutMins < 0 {
+			return 0
+		}
+		return *proj.AgentSessionIdleTimeoutMins
+	}
+	if cfg != nil && cfg.Sessions.IdleTimeoutMins != nil {
+		if *cfg.Sessions.IdleTimeoutMins < 0 {
+			return 0
+		}
+		return *cfg.Sessions.IdleTimeoutMins
+	}
+	return DefaultAgentSessionIdleTimeoutMins
 }
 
 // WebhookConfig controls the external HTTP webhook endpoint.
@@ -542,6 +596,10 @@ type ProjectConfig struct {
 	// AgentSessionIdleTimeoutMins 在指定分钟数后关闭空闲的 live agent 进程，
 	// 同时保留已保存的 session ID，便于下一条消息继续恢复。0 或 nil 表示禁用。
 	AgentSessionIdleTimeoutMins *int `toml:"agent_session_idle_timeout_mins,omitempty"`
+	// MaxLiveAgentSessions caps live agent processes for this project alone,
+	// on top of the instance-wide [sessions].max_live. 0 or nil = no
+	// per-project cap.
+	MaxLiveAgentSessions *int `toml:"max_live_agent_sessions,omitempty"`
 	// RunAsUser, when set, causes the agent command for this project to be
 	// spawned under a different Unix user via `sudo -n -iu <user> --`. This
 	// provides OS-level file-system isolation from the supervisor user who
@@ -1107,6 +1165,9 @@ func (c *Config) validateInternal(permissive bool) error {
 		}
 		if proj.AgentSessionIdleTimeoutMins != nil && *proj.AgentSessionIdleTimeoutMins < 0 {
 			return fmt.Errorf("config: %s.agent_session_idle_timeout_mins must be >= 0", prefix)
+		}
+		if proj.MaxLiveAgentSessions != nil && *proj.MaxLiveAgentSessions < 0 {
+			return fmt.Errorf("config: %s.max_live_agent_sessions must be >= 0", prefix)
 		}
 		if err := validateRunAsUser(prefix, proj.RunAsUser); err != nil {
 			return err

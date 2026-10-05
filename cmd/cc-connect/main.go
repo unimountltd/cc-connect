@@ -368,6 +368,10 @@ func main() {
 	engines := make([]*core.Engine, 0, len(cfg.Projects))
 	effectiveWorkDirs := make([]string, 0, len(cfg.Projects))
 
+	// One live-session cap for the whole instance ([sessions].max_live).
+	liveSessionLimiter = core.NewLiveSessionLimiter(config.EffectiveMaxLiveSessions(cfg))
+	slog.Info("live agent session cap", "max_live", liveSessionLimiter.Max(), "unlimited", liveSessionLimiter.Max() == 0)
+
 	for _, proj := range cfg.Projects {
 		// Inject project-level run_as_user / run_as_env into the agent's
 		// opts map so agents that support isolation can pick them up
@@ -429,6 +433,7 @@ func main() {
 		}
 
 		engine := core.NewEngine(proj.Name, agent, platforms, sessionFile, lang)
+		engine.SetLiveSessionLimiter(liveSessionLimiter)
 		// Wire display settings including show_context_indicator and reply_footer
 		// Global [display] config can be overridden by project-level settings
 		_, _, _, _, _, showCtx, showFooter, _ := config.EffectiveDisplay(cfg, &proj)
@@ -720,14 +725,7 @@ func main() {
 			slog.Info("project: reset_on_idle_mins not set, applying default — set reset_on_idle_mins = 0 to opt out, see docs/usage.md",
 				"project", proj.Name, "default_minutes", defaultResetOnIdleMins)
 		}
-		if proj.AgentSessionIdleTimeoutMins != nil {
-			mins := *proj.AgentSessionIdleTimeoutMins
-			if mins <= 0 {
-				engine.SetAgentSessionIdleTimeout(0)
-			} else {
-				engine.SetAgentSessionIdleTimeout(time.Duration(mins) * time.Minute)
-			}
-		}
+		applyLiveSessionSettings(engine, cfg, &proj)
 
 		// Wire sender injection
 		if proj.InjectSender != nil {
@@ -1836,18 +1834,13 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		slog.Info("project: reset_on_idle_mins not set, applying default — set reset_on_idle_mins = 0 to opt out, see docs/usage.md",
 			"project", proj.Name, "default_minutes", defaultResetOnIdleMins)
 	}
-	if proj.AgentSessionIdleTimeoutMins != nil {
-		mins := *proj.AgentSessionIdleTimeoutMins
-		if mins <= 0 {
-			engine.SetAgentSessionIdleTimeout(0)
-		} else {
-			engine.SetAgentSessionIdleTimeout(time.Duration(mins) * time.Minute)
-		}
-	} else {
-		// A reload may remove this option after timers were scheduled; reset
-		// explicitly so those stale idle-close timers cannot fire later.
-		engine.SetAgentSessionIdleTimeout(0)
+	// Always re-apply: a reload may have changed or removed the idle timeout
+	// after timers were scheduled, and SetAgentSessionIdleTimeout(0) cancels
+	// those stale timers.
+	if liveSessionLimiter != nil {
+		liveSessionLimiter.SetMax(config.EffectiveMaxLiveSessions(cfg))
 	}
+	applyLiveSessionSettings(engine, cfg, proj)
 
 	// Reload instant reply
 	if cfg.InstantReply.Enabled != nil && *cfg.InstantReply.Enabled {
@@ -2120,6 +2113,25 @@ func buildHeartbeatConfig(hc config.HeartbeatConfig) core.HeartbeatConfig {
 		cfg.TimeoutMins = *hc.TimeoutMins
 	}
 	return cfg
+}
+
+// liveSessionLimiter is the instance-wide cap on live agent processes,
+// shared by every engine. Created at startup, re-tuned on config reload.
+var liveSessionLimiter *core.LiveSessionLimiter
+
+// applyLiveSessionSettings wires the per-project live-session settings: the
+// idle close timeout (project override → [sessions].idle_timeout_mins →
+// default) and the optional per-project process cap.
+func applyLiveSessionSettings(engine *core.Engine, cfg *config.Config, proj *config.ProjectConfig) {
+	mins := config.EffectiveAgentSessionIdleTimeoutMins(cfg, proj)
+	if mins <= 0 {
+		engine.SetAgentSessionIdleTimeout(0)
+	} else {
+		engine.SetAgentSessionIdleTimeout(time.Duration(mins) * time.Minute)
+	}
+	engine.SetMaxLiveAgentSessions(derefInt(proj.MaxLiveAgentSessions))
+	slog.Info("live agent session settings",
+		"project", proj.Name, "idle_timeout_mins", mins, "project_max_live", derefInt(proj.MaxLiveAgentSessions))
 }
 
 func derefInt(v *int) int {

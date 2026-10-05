@@ -92,6 +92,22 @@ Listed roughly newest-first within each section. Commit hashes link to fork hist
 
 ## Session control
 
+- **Live agent session cap + 24 h idle default** (`core/live_sessions.go`)
+  One agent process (plus its MCP servers, ~1 GB together) per session key used to live
+  forever. `[sessions] max_live` (default 3, 0 = unlimited) now caps live processes
+  across the whole instance; when a new channel needs a process the least recently used
+  *idle* session is closed first. A session mid-turn, with a permission prompt open, with
+  queued messages, or whose cc-connect `Session` is locked (wakeup/orphan turns) is never
+  evicted; if every session is busy the new message waits (user is told) up to 30 min.
+  `[sessions] idle_timeout_mins` (default 1440) is the global default for the existing
+  per-project `agent_session_idle_timeout_mins`; `max_live_agent_sessions` adds a
+  per-project cap. Closing keeps the saved agent session ID so the next message resumes
+  via `--resume`. Each close is logged with `reason=idle|evicted`, each spawn with
+  `is_resume`. Set both to `0` for the old behaviour. Companion fix in
+  `agent/claudecode/proc_unix.go`: context cancellation (Engine.Stop cancels `e.ctx`
+  before `Close`) used to SIGKILL only the direct child and orphan every MCP server;
+  `cmd.Cancel` now SIGTERMs the process group and a post-`Wait` sweep SIGKILLs leftovers.
+
 - **`/next <prompt>` + `--session-cmd /new --message "..."`** (`9d1e5a69`)
   A "reset + kick off" primitive. `/next` is sugar for `/new` followed by a first-turn
   message. The `--session-cmd` + `--message` combo atomically resets and injects the

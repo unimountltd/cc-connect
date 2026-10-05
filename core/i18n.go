@@ -523,6 +523,8 @@ const (
 	MsgInitialMessage         MsgKey = "initial_message"
 	MsgNextUsage              MsgKey = "next_usage"
 	MsgSessionAutoResetIdle   MsgKey = "session_auto_reset_idle"
+	MsgSessionWaitingForSlot  MsgKey = "session_waiting_for_slot"
+	MsgSessionSlotUnavailable MsgKey = "session_slot_unavailable"
 	MsgSessionClosingGraceful MsgKey = "session_closing_graceful"
 
 	MsgDeleteUsage              MsgKey = "delete_usage"
@@ -3285,6 +3287,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "用法：`/next <提示詞>` — 新建會話並立即發送提示詞。",
 		LangJapanese:           "使い方：`/next <プロンプト>` — 新規セッションを作成し、最初のターンとして送信。",
 		LangSpanish:            "Uso: `/next <prompt>` — inicia una sesión nueva y envía el prompt como primer turno.",
+	},
+	MsgSessionWaitingForSlot: {
+		LangEnglish:            "⏳ All agent slots are in use right now. Your message is queued and will run as soon as one frees up.",
+		LangChinese:            "⏳ 当前所有 agent 槽位都在忙。你的消息已排队，有空位后会立即执行。",
+		LangTraditionalChinese: "⏳ 目前所有 agent 槽位都在忙。你的訊息已排隊，有空位後會立即執行。",
+		LangJapanese:           "⏳ 現在すべてのエージェントスロットが使用中です。メッセージはキューに入り、空きが出たら実行されます。",
+		LangSpanish:            "⏳ Todos los slots de agente están ocupados. Tu mensaje está en cola y se ejecutará en cuanto se libere uno.",
+	},
+	MsgSessionSlotUnavailable: {
+		LangEnglish:            "❌ Gave up waiting for a free agent slot. Please try again later or raise max_live in [sessions].",
+		LangChinese:            "❌ 等待空闲 agent 槽位超时。请稍后重试，或提高 [sessions] 中的 max_live。",
+		LangTraditionalChinese: "❌ 等待空閒 agent 槽位逾時。請稍後重試，或提高 [sessions] 中的 max_live。",
+		LangJapanese:           "❌ 空きエージェントスロットの待機がタイムアウトしました。後で再試行するか、[sessions] の max_live を増やしてください。",
+		LangSpanish:            "❌ Se agotó la espera por un slot de agente libre. Inténtalo más tarde o aumenta max_live en [sessions].",
 	},
 	MsgSessionAutoResetIdle: {
 		LangEnglish:            "⏰ Session auto-reset after %d minute(s) of inactivity.",

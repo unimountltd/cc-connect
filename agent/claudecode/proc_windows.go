@@ -29,6 +29,25 @@ func prepareCmdForKill(cmd *exec.Cmd) {
 	cmd.SysProcAttr.CreationFlags |= syscall.CREATE_NEW_PROCESS_GROUP
 }
 
+// installGroupCancel makes context cancellation take the whole tree down, not
+// just the direct child (see proc_unix.go for the rationale). Only valid on a
+// cmd created with exec.CommandContext.
+func installGroupCancel(cmd *exec.Cmd) {
+	if cmd == nil {
+		return
+	}
+	cmd.Cancel = func() error {
+		return forceKillCmd(cmd)
+	}
+}
+
+// sweepProcessGroup is the post-Wait sweep of leftover descendants. On
+// Windows taskkill /T needs the (already reaped) root PID, so this is
+// best-effort only; the Cancel hook above does the real work.
+func sweepProcessGroup(cmd *exec.Cmd) error {
+	return forceKillCmd(cmd)
+}
+
 // signalProcessGroup is a graceful best-effort equivalent of forceKillCmd
 // on Windows: taskkill without /F asks the target to close cleanly. Falls
 // back to cmd.Process.Signal if taskkill is unavailable.

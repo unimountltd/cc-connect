@@ -3,6 +3,7 @@
 package claudecode
 
 import (
+	"context"
 	"os/exec"
 	"syscall"
 	"testing"
@@ -110,4 +111,45 @@ func TestSignalProcessGroup_NilCmd(t *testing.T) {
 	if err := signalProcessGroup(nil, syscall.SIGTERM); err != nil {
 		t.Errorf("expected no error on nil cmd, got %v", err)
 	}
+}
+
+// A context cancellation must take down the whole process group, not just the
+// direct child, otherwise MCP servers survive Engine.Stop (which cancels the
+// engine context before Close runs).
+func TestPrepareCmdForKill_CancelSignalsProcessGroup(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Parent shell spawns a grandchild that ignores stdin EOF; both share the
+	// new process group.
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", "sleep 30 & wait")
+	prepareCmdForKill(cmd)
+	installGroupCancel(cmd)
+	if cmd.Cancel == nil {
+		t.Fatal("installGroupCancel must install a group-wide Cancel")
+	}
+	cmd.WaitDelay = 2 * time.Second
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	pgid := cmd.Process.Pid
+	time.Sleep(100 * time.Millisecond) // let sh fork sleep
+
+	cancel()
+	waitErr := make(chan error, 1)
+	go func() { waitErr <- cmd.Wait() }()
+	select {
+	case <-waitErr:
+	case <-time.After(5 * time.Second):
+		t.Fatal("process did not exit after context cancellation")
+	}
+	_ = sweepProcessGroup(cmd)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(-pgid, 0); err == syscall.ESRCH {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("process group %d still has members after cancel + sweep", pgid)
 }

@@ -190,6 +190,36 @@ level = "info" # debug, info, warn, error
 # agent_session_idle_timeout_mins = 30
 
 # =============================================================================
+# Live agent session cap ([sessions])
+# =============================================================================
+# Every session key (e.g. every Slack channel with share_session_in_channel)
+# owns one agent process plus its MCP servers — several hundred MB each, held
+# until closed. These settings bound that footprint for the whole instance.
+#
+#   max_live           max live agent processes across all projects. When a
+#                      new session needs a process and the cap is reached, the
+#                      least recently used *idle* session is closed first. A
+#                      session that is mid-turn, has a permission prompt open
+#                      or has queued messages is never closed; if every session
+#                      is busy the new message waits and the user is told.
+#                      Default 3. 0 = unlimited (old behaviour).
+#   idle_timeout_mins  close a live agent process this many minutes after its
+#                      last turn. Per-project agent_session_idle_timeout_mins
+#                      overrides it. Default 1440 (24h). 0 = never (old behaviour).
+#
+# Closing keeps the saved agent session ID, so the next message to that
+# channel resumes the conversation (claude --resume). If the old process could
+# not be confirmed dead, the session starts fresh and says so in its reply.
+# Per project, max_live_agent_sessions adds a tighter cap for that project.
+#
+# [sessions]
+# max_live = 3
+# idle_timeout_mins = 1440
+#
+# [[projects]]
+# max_live_agent_sessions = 2
+
+# =============================================================================
 # OS-user isolation via run_as_user (Linux/macOS only)
 # 通过 run_as_user 实现 OS 用户隔离（仅限 Linux/macOS）
 # =============================================================================
