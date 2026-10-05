@@ -231,8 +231,6 @@ var topLevelCommandHandlers = map[string]func([]string){
 	// Fork-only commands (see docs/fork-features.md). These must stay
 	// registered here: upstream rejects unknown top-level commands, so a
 	// merge that takes this map wholesale silently breaks them.
-	"usage":     runUsage,
-	"dashboard": runDashboard,
 	// `version` as a real subcommand, so it prints and exits instead of
 	// falling through to a full daemon start.
 	"version": func(_ []string) {
@@ -1711,12 +1709,6 @@ Commands:
     example          Print a complete annotated config.toml example
     format           Format the config file (alias: fmt)
     path             Print the resolved config file path
-
-  usage              Show usage stats from PostHog telemetry
-                     (--days N, --project NAME, --format table|json)
-
-  dashboard          Manage PostHog analytics dashboards
-    setup            Create Slack-usage dashboard (by channel, by user)
 
   update             Check for updates and upgrade the binary
                        (default: latest stable)

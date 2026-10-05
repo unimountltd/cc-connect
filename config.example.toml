@@ -452,11 +452,6 @@ level = "info" # debug, info, warn, error
 # endpoint = "https://eu.i.posthog.com/capture/"  # EU endpoint (default) / EU 端点（默认）
 # hash_content = true                    # send a SHA-256 hash instead of message text / 以哈希代替消息文本
 # disabled = true                        # force off while keeping the key / 保留密钥但强制关闭
-#
-# For `cc-connect usage` queries (requires personal API key) / 用于 usage 查询:
-# personal_api_key = "phx_xxxxxxxxxxxx"  # Personal API key / 个人 API 密钥
-# project_id = "12345"                   # PostHog project ID / PostHog 项目 ID
-# query_base_url = "https://eu.posthog.com"  # Query API base URL / 查询 API 基础 URL
 
 # =============================================================================
 # Hooks (Event Triggers / 事件钩子)

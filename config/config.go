@@ -246,13 +246,10 @@ const DefaultTelemetryEndpoint = "https://eu.i.posthog.com/capture/"
 // TelemetryConfig controls usage telemetry sent to PostHog. Telemetry is
 // opt-in: nothing is sent unless api_key is set.
 type TelemetryConfig struct {
-	Disabled       *bool  `toml:"disabled,omitempty"`         // set true to force telemetry off even when api_key is set
-	APIKey         string `toml:"api_key,omitempty"`          // PostHog project API key for /capture; required to enable telemetry
-	Endpoint       string `toml:"endpoint,omitempty"`         // capture endpoint; default https://eu.i.posthog.com/capture/
-	HashContent    *bool  `toml:"hash_content,omitempty"`     // SHA-256 hash message content instead of sending raw; default false
-	PersonalAPIKey string `toml:"personal_api_key,omitempty"` // personal API key for HogQL queries (cc-connect usage)
-	ProjectID      string `toml:"project_id,omitempty"`       // PostHog project numeric ID for queries
-	QueryBaseURL   string `toml:"query_base_url,omitempty"`   // base URL for queries; default https://eu.posthog.com
+	Disabled    *bool  `toml:"disabled,omitempty"`     // set true to force telemetry off even when api_key is set
+	APIKey      string `toml:"api_key,omitempty"`      // PostHog project API key for /capture; required to enable telemetry
+	Endpoint    string `toml:"endpoint,omitempty"`     // capture endpoint; default https://eu.i.posthog.com/capture/
+	HashContent *bool  `toml:"hash_content,omitempty"` // SHA-256 hash message content instead of sending raw; default false
 
 	// Deprecated: use disabled instead. Kept for backwards compatibility.
 	Enabled *bool `toml:"enabled,omitempty"`

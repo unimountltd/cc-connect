@@ -133,10 +133,12 @@ Listed roughly newest-first within each section. Commit hashes link to fork hist
 
 ## Telemetry (PostHog)
 
-- **Per-turn PostHog collector + `cc-connect usage` CLI** (`d8476876`)
+- **Per-turn PostHog collector** (`d8476876`)
   Token usage, tool counts, duration, model, mode, and skill metadata reported per
-  turn. Query metrics with HogQL via `cc-connect usage`. Configured under `[telemetry]`
-  in `config.toml`.
+  turn. Configured under `[telemetry]` in `config.toml`. The companion `cc-connect usage`
+  and `cc-connect dashboard setup` CLIs, the HogQL query client, and the
+  `personal_api_key` / `project_id` / `query_base_url` config fields were removed on
+  2026-10-05; query PostHog directly instead.
 
 - **Opt-in only, no embedded key** (supersedes `3026bad2`, 2026-10-05)
   Telemetry is off unless `[telemetry] api_key` is set to the deployment's own PostHog
@@ -146,11 +148,9 @@ Listed roughly newest-first within each section. Commit hashes link to fork hist
   is still honoured. Note that events carry the raw user message text unless
   `hash_content = true`.
 
-- **Channel / user breakdowns + `dashboard setup`** (`040465e1`)
+- **Channel / user breakdowns** (`040465e1`)
   `chat_name` is threaded through the engine so PostHog events carry a human-readable
   channel name; `chat_id` is now populated for Slack (which never sets `ChannelKey`).
-  `cc-connect dashboard setup` creates a PostHog dashboard with six HogQL insights:
-  turns by channel/user, tokens by channel/user, daily trend, and a detail table.
 
 ## Updater & release channels
 
