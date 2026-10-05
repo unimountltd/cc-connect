@@ -25,10 +25,9 @@ func runUsage(args []string) {
 		os.Exit(1)
 	}
 
-	if !cfg.Telemetry.TelemetryEnabled() {
-		fmt.Fprintln(os.Stderr, "Telemetry is off. Set [telemetry] api_key in config.toml (and remove disabled=true if present).")
-		os.Exit(1)
-	}
+	// Querying needs only the personal key + project ID; it does not require
+	// sending to be enabled, so historical data stays reachable after opting
+	// out of collection.
 	if cfg.Telemetry.PersonalAPIKey == "" || cfg.Telemetry.ProjectID == "" {
 		fmt.Fprintln(os.Stderr, "telemetry.personal_api_key and telemetry.project_id are required for usage queries.")
 		os.Exit(1)
