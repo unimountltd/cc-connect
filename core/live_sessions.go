@@ -147,17 +147,6 @@ func (e *Engine) SetMaxLiveAgentSessions(n int) {
 	e.maxLiveSessions.Store(int64(n))
 }
 
-// touchActivity records that the session was just used; the LRU eviction
-// order is derived from this timestamp.
-func touchActivity(state *interactiveState) {
-	if state == nil {
-		return
-	}
-	state.mu.Lock()
-	state.lastActivity = time.Now()
-	state.mu.Unlock()
-}
-
 // beginStateTurn / endStateTurn bracket foreground and unsolicited turns so
 // eviction and idle close can tell a busy session from an idle one without
 // relying on the idle-timer token.
