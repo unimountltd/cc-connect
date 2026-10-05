@@ -238,18 +238,16 @@ type ManagementConfig struct {
 	CORSOrigins []string `toml:"cors_origins,omitempty"` // allowed CORS origins; empty = no CORS
 }
 
-// Default PostHog project API key for anonymous usage telemetry.
-// This is a write-only key — it can only send events to the /capture endpoint
-// and cannot read, query, or delete any data. Safe to embed in client code.
-const (
-	DefaultTelemetryAPIKey   = "phc_xdjoDjixkHBsNi75uoj65ERxbEiEuENJsdAvXj2tn8oN"
-	DefaultTelemetryEndpoint = "https://eu.i.posthog.com/capture/"
-)
+// DefaultTelemetryEndpoint is the PostHog capture endpoint used when
+// [telemetry].endpoint is not set. There is deliberately no default API key:
+// telemetry is off unless a deployment configures its own project key.
+const DefaultTelemetryEndpoint = "https://eu.i.posthog.com/capture/"
 
-// TelemetryConfig controls usage telemetry sent to PostHog.
+// TelemetryConfig controls usage telemetry sent to PostHog. Telemetry is
+// opt-in: nothing is sent unless api_key is set.
 type TelemetryConfig struct {
-	Disabled       *bool  `toml:"disabled,omitempty"`         // set true to opt out; default: telemetry is ON
-	APIKey         string `toml:"api_key,omitempty"`          // override PostHog project API key for /capture
+	Disabled       *bool  `toml:"disabled,omitempty"`         // set true to force telemetry off even when api_key is set
+	APIKey         string `toml:"api_key,omitempty"`          // PostHog project API key for /capture; required to enable telemetry
 	Endpoint       string `toml:"endpoint,omitempty"`         // capture endpoint; default https://eu.i.posthog.com/capture/
 	HashContent    *bool  `toml:"hash_content,omitempty"`     // SHA-256 hash message content instead of sending raw; default false
 	PersonalAPIKey string `toml:"personal_api_key,omitempty"` // personal API key for HogQL queries (cc-connect usage)
@@ -260,26 +258,26 @@ type TelemetryConfig struct {
 	Enabled *bool `toml:"enabled,omitempty"`
 }
 
-// TelemetryEnabled reports whether telemetry should be active.
-// Telemetry is ON by default. It is disabled when disabled=true,
-// or when the legacy enabled=false is set.
+// TelemetryEnabled reports whether telemetry should be active. Telemetry is
+// OFF by default: it requires an api_key, and is additionally disabled when
+// disabled=true or the legacy enabled=false is set.
 func (t TelemetryConfig) TelemetryEnabled() bool {
+	if t.APIKey == "" {
+		return false
+	}
 	if t.Disabled != nil {
 		return !*t.Disabled
 	}
 	if t.Enabled != nil {
 		return *t.Enabled
 	}
-	return true // on by default
+	return true
 }
 
-// EffectiveAPIKey returns the API key to use for /capture, falling back
-// to the built-in default when none is configured.
+// EffectiveAPIKey returns the configured API key for /capture. Empty means
+// telemetry is off; there is no built-in fallback key.
 func (t TelemetryConfig) EffectiveAPIKey() string {
-	if t.APIKey != "" {
-		return t.APIKey
-	}
-	return DefaultTelemetryAPIKey
+	return t.APIKey
 }
 
 // EffectiveEndpoint returns the capture endpoint, falling back to the default.

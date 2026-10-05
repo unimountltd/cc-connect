@@ -26,7 +26,7 @@ func runUsage(args []string) {
 	}
 
 	if !cfg.Telemetry.TelemetryEnabled() {
-		fmt.Fprintln(os.Stderr, "Telemetry is disabled. Remove [telemetry] disabled=true from config.toml.")
+		fmt.Fprintln(os.Stderr, "Telemetry is off. Set [telemetry] api_key in config.toml (and remove disabled=true if present).")
 		os.Exit(1)
 	}
 	if cfg.Telemetry.PersonalAPIKey == "" || cfg.Telemetry.ProjectID == "" {

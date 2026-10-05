@@ -138,10 +138,13 @@ Listed roughly newest-first within each section. Commit hashes link to fork hist
   turn. Query metrics with HogQL via `cc-connect usage`. Configured under `[telemetry]`
   in `config.toml`.
 
-- **Enabled by default with embedded write-only key** (`3026bad2`)
-  Every deployment reports anonymous metrics out of the box; the embedded `phc_` key
-  is write-only and cannot read or query. Opt out with `[telemetry] disabled = true`.
-  Old `enabled = true/false` field is still honoured.
+- **Opt-in only, no embedded key** (supersedes `3026bad2`, 2026-10-05)
+  Telemetry is off unless `[telemetry] api_key` is set to the deployment's own PostHog
+  project key. The write-only key that was embedded in `config/config.go` from April to
+  October 2026 has been removed from the source (and should be rotated in PostHog, since
+  the fork is public). `disabled = true` still forces it off; the legacy `enabled` field
+  is still honoured. Note that events carry the raw user message text unless
+  `hash_content = true`.
 
 - **Channel / user breakdowns + `dashboard setup`** (`040465e1`)
   `chat_name` is threaded through the engine so PostHog events carry a human-readable

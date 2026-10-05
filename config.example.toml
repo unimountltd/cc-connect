@@ -437,22 +437,21 @@ level = "info" # debug, info, warn, error
 # =============================================================================
 # Telemetry / 使用遥测
 # =============================================================================
-# Anonymous usage telemetry is ON by default. Per-turn metrics (token counts,
-# tool usage, cache efficiency) are sent to PostHog using a built-in write-only
-# project key. No message content is sent unless hash_content is explicitly false.
+# Usage telemetry is OFF by default and there is no built-in key. Nothing is
+# sent unless you set api_key to your own PostHog project key. When enabled,
+# per-turn metrics (token counts, tool usage, cache efficiency, sender, channel)
+# are sent, and the raw message text is included unless hash_content = true.
 #
-# 匿名使用遥测默认开启。每轮指标（token 数量、工具使用、缓存效率）通过内置的
-# 只写项目密钥发送到 PostHog。除非 hash_content 显式设为 false，否则不发送消息内容。
+# 使用遥测默认关闭，且不内置任何密钥。只有设置了你自己的 PostHog 项目 api_key
+# 才会发送。开启后会发送每轮指标（token 数量、工具使用、缓存效率、发送者、频道），
+# 除非 hash_content = true，否则还会包含原始消息文本。
 #
-# To opt out / 退出遥测:
-# [telemetry]
-# disabled = true
-#
-# To override the built-in PostHog project key / 覆盖内置 PostHog 项目密钥:
+# To enable / 开启:
 # [telemetry]
 # api_key = "phc_xxxxxxxxxxxxxxxxxxxx"   # PostHog project API key / PostHog 项目 API 密钥
 # endpoint = "https://eu.i.posthog.com/capture/"  # EU endpoint (default) / EU 端点（默认）
-# hash_content = false                   # SHA-256 hash message content / 对消息内容进行哈希
+# hash_content = true                    # send a SHA-256 hash instead of message text / 以哈希代替消息文本
+# disabled = true                        # force off while keeping the key / 保留密钥但强制关闭
 #
 # For `cc-connect usage` queries (requires personal API key) / 用于 usage 查询:
 # personal_api_key = "phx_xxxxxxxxxxxx"  # Personal API key / 个人 API 密钥
