@@ -148,6 +148,13 @@ level = "info" # debug, info, warn, error
 # Agent 空闲超时：两次 agent 事件之间的最大等待分钟数，超时则认为会话卡住。设为 0 禁用。
 # idle_timeout_mins = 120  # default: 120 (2 hours) / 默认 120（2 小时）
 
+# Stall notice: if the agent produces no events for this many minutes, post a
+# one-off "no response, send /stop to cancel" notice in the chat. Unlike
+# idle_timeout_mins it does not end the turn. Set to 0 to disable.
+# 停滞提醒：agent 连续这么多分钟没有任何事件时，在会话中发送一次提醒（可 /stop 取消）。
+# 与 idle_timeout_mins 不同，它不会结束本轮。设为 0 禁用。
+# stall_notice_mins = 10  # default: 10 / 默认 10
+
 # Absolute wall-clock cap per agent turn in minutes. Unlike idle_timeout_mins
 # (which resets on every event), this timer is never reset — it guarantees the
 # session is released even when a long bash command generates periodic tool events.

@@ -695,6 +695,15 @@ func main() {
 			}
 		}
 
+		// Wire stall notice (one-off "agent has gone quiet" message; 0 = disabled)
+		if cfg.StallNoticeMins != nil {
+			if mins := *cfg.StallNoticeMins; mins <= 0 {
+				engine.SetStallNoticeTimeout(0)
+			} else {
+				engine.SetStallNoticeTimeout(time.Duration(mins) * time.Minute)
+			}
+		}
+
 		// Wire max turn time (absolute per-turn wall-clock cap; 0 = disabled)
 		if cfg.MaxTurnTimeMins != nil && *cfg.MaxTurnTimeMins > 0 {
 			engine.SetMaxTurnTime(time.Duration(*cfg.MaxTurnTimeMins) * time.Minute)

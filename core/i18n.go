@@ -203,6 +203,9 @@ const (
 	MsgToolResultFmtFailed       MsgKey = "tool_result_fmt_failed"
 	MsgExecutionStopped          MsgKey = "execution_stopped"
 	MsgSessionCloseFailed        MsgKey = "session_close_failed"
+	MsgTurnStalled               MsgKey = "turn_stalled"
+	MsgTurnStalledTool           MsgKey = "turn_stalled_tool"
+	MsgQueuedMessageNotRun       MsgKey = "queued_message_not_run"
 	MsgSessionResumeUnsafe       MsgKey = "session_resume_unsafe"
 	MsgSessionCancelled          MsgKey = "session_cancelled"
 	MsgNoExecution               MsgKey = "no_execution"
@@ -793,6 +796,27 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "⏹",
 		LangJapanese:           "⏹",
 		LangSpanish:            "⏹",
+	},
+	MsgTurnStalled: {
+		LangEnglish:            "⏳ No response from the agent for %d min. It may be stuck. Send /stop to cancel, or keep waiting.",
+		LangChinese:            "⏳ Agent 已 %d 分钟没有响应，可能卡住了。发送 /stop 取消，或继续等待。",
+		LangTraditionalChinese: "⏳ Agent 已 %d 分鐘沒有回應，可能卡住了。傳送 /stop 取消，或繼續等待。",
+		LangJapanese:           "⏳ エージェントから %d 分間応答がありません。停止している可能性があります。/stop でキャンセルするか、そのままお待ちください。",
+		LangSpanish:            "⏳ El agente no responde desde hace %d min. Puede estar bloqueado. Envía /stop para cancelar o sigue esperando.",
+	},
+	MsgTurnStalledTool: {
+		LangEnglish:            "⏳ No activity from the agent for %d min — still running %s. Send /stop to cancel if this is unexpected.",
+		LangChinese:            "⏳ Agent 已 %d 分钟没有新动态，仍在运行 %s。如不符合预期，发送 /stop 取消。",
+		LangTraditionalChinese: "⏳ Agent 已 %d 分鐘沒有新動態，仍在執行 %s。如不符合預期，傳送 /stop 取消。",
+		LangJapanese:           "⏳ エージェントの動きが %d 分間ありません（%s を実行中）。想定外であれば /stop でキャンセルしてください。",
+		LangSpanish:            "⏳ Sin actividad del agente desde hace %d min; sigue ejecutando %s. Envía /stop para cancelar si no es lo esperado.",
+	},
+	MsgQueuedMessageNotRun: {
+		LangEnglish:            "⏹ The session was stopped, so this queued message was not run: “%s”. Send it again if you still need it.",
+		LangChinese:            "⏹ 会话已停止，这条排队中的消息未执行：“%s”。如仍需要，请重新发送。",
+		LangTraditionalChinese: "⏹ 工作階段已停止，這則排隊中的訊息未執行：「%s」。如仍需要，請重新傳送。",
+		LangJapanese:           "⏹ セッションが停止されたため、キュー内のこのメッセージは実行されませんでした：「%s」。必要であれば再送してください。",
+		LangSpanish:            "⏹ La sesión se detuvo, así que este mensaje en cola no se ejecutó: “%s”. Vuelve a enviarlo si aún lo necesitas.",
 	},
 	MsgSessionCloseFailed: {
 		LangEnglish:            "⚠️ Warning: the stopped session's background process could not be confirmed killed. It may still be running and using its old credentials.",

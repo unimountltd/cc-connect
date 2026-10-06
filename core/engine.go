@@ -414,6 +414,7 @@ type Engine struct {
 	references       ReferenceRenderCfg
 	relayManager     *RelayManager
 	eventIdleTimeout time.Duration
+	stallNoticeAfter time.Duration // post a one-off "no activity" notice after this much silence (0 = disabled)
 	maxTurnTime      time.Duration // absolute wall-clock cap per turn (0 = disabled)
 	// agentSessionIdleTimeoutNanos 在单轮正常结束后关闭空闲的 live agent 进程，
 	// 同时保留已保存的 session ID，便于下次继续恢复。
@@ -799,6 +800,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		streamPreview:         DefaultStreamPreviewCfg(),
 		references:            DefaultReferenceRenderCfg(),
 		eventIdleTimeout:      defaultEventIdleTimeout,
+		stallNoticeAfter:      defaultStallNoticeAfter,
 		maxQueuedMessages:     defaultMaxQueuedMessages,
 		showContextIndicator:  true,
 		telemetry:             NoopTelemetryCollector(),
@@ -1419,6 +1421,14 @@ func (e *Engine) SetMaxTurnTime(d time.Duration) {
 // 0 disables the timeout entirely.
 func (e *Engine) SetEventIdleTimeout(d time.Duration) {
 	e.eventIdleTimeout = d
+}
+
+// SetStallNoticeTimeout sets how long a turn may go without any agent event
+// before the user is told the agent has gone quiet. Unlike the event idle
+// timeout this does not end the turn; it fires once per quiet period and is
+// re-armed by the next event. 0 disables the notice.
+func (e *Engine) SetStallNoticeTimeout(d time.Duration) {
+	e.stallNoticeAfter = d
 }
 
 // SetMaxQueuedMessages sets the per-session message queue depth.
@@ -4881,6 +4891,36 @@ func (e *Engine) notifySessionCloseFailure(sessionKey string, platform Platform,
 
 const defaultEventIdleTimeout = 2 * time.Hour
 
+// defaultStallNoticeAfter is long enough that a normal long-running tool call
+// (Claude Code's Bash tool caps at 10 minutes) rarely triggers it, and short
+// enough that a wedged agent does not leave the chat silent for an hour.
+const defaultStallNoticeAfter = 10 * time.Minute
+
+// resetTimer stops t, drains a pending fire, and restarts it with d.
+func resetTimer(t *time.Timer, d time.Duration) {
+	if !t.Stop() {
+		select {
+		case <-t.C:
+		default:
+		}
+	}
+	t.Reset(d)
+}
+
+// stallNoticeText builds the user-facing "agent has gone quiet" notice.
+// runningTool is the tool the agent started and has not reported back on,
+// or "" when the agent is waiting on the model itself.
+func (e *Engine) stallNoticeText(quiet time.Duration, runningTool string) string {
+	mins := int(quiet.Round(time.Minute) / time.Minute)
+	if mins < 1 {
+		mins = 1
+	}
+	if runningTool != "" {
+		return e.i18n.Tf(MsgTurnStalledTool, mins, runningTool)
+	}
+	return e.i18n.Tf(MsgTurnStalled, mins)
+}
+
 // cardToolEntry stores a tool call record for card content rendering.
 type cardToolEntry struct {
 	Index int
@@ -5356,6 +5396,18 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		idleCh = idleTimer.C
 	}
 
+	// Stall notice: one heads-up per quiet period so a wedged agent does not
+	// leave the chat silent until the idle timeout finally kills the turn.
+	// stallTool is the tool currently running (started, no result yet).
+	var stallTimer *time.Timer
+	var stallCh <-chan time.Time
+	var stallTool string
+	if e.stallNoticeAfter > 0 {
+		stallTimer = time.NewTimer(e.stallNoticeAfter)
+		defer stallTimer.Stop()
+		stallCh = stallTimer.C
+	}
+
 	// Max turn time: absolute wall-clock cap that does NOT reset on events.
 	// Prevents long-running tool calls from blocking the session forever (#1091).
 	var turnDeadlineCh <-chan time.Time
@@ -5409,6 +5461,18 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
 				return
 			}
+			continue
+		case <-stallCh:
+			// Disarm until the next event so a long stall posts one notice,
+			// not one per interval.
+			stallCh = nil
+			slog.Warn("agent turn stalled: no events, notifying user",
+				"session_key", sessionKey, "quiet_for", e.stallNoticeAfter,
+				"running_tool", stallTool, "elapsed", time.Since(turnStart))
+			state.mu.Lock()
+			p := state.platform
+			state.mu.Unlock()
+			e.send(p, replyCtx, e.stallNoticeText(e.stallNoticeAfter, stallTool))
 			continue
 		case <-idleCh:
 			slog.Error("agent session idle timeout: no events for too long, killing session",
@@ -5494,6 +5558,18 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 			}
 			idleTimer.Reset(e.eventIdleTimeout)
+		}
+		if stallTimer != nil {
+			resetTimer(stallTimer, e.stallNoticeAfter)
+			stallCh = stallTimer.C
+		}
+		switch event.Type {
+		case EventToolUse:
+			stallTool = event.ToolName
+		case EventToolResult, EventText, EventThinking, EventResult:
+			// Any later output means the tool has finished, even for
+			// agents that never emit an explicit tool result.
+			stallTool = ""
 		}
 
 		if !firstEventLogged {
@@ -6028,6 +6104,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// Restart idle timer after permission is resolved
 			if idleTimer != nil {
 				idleTimer.Reset(e.eventIdleTimeout)
+			}
+			// The wait was on the user, not the agent: discard any stall
+			// fire that accumulated meanwhile and start a fresh window.
+			if stallTimer != nil {
+				resetTimer(stallTimer, e.stallNoticeAfter)
+				stallCh = stallTimer.C
 			}
 
 		case EventResult:
@@ -6808,6 +6890,26 @@ func (e *Engine) notifyDroppedQueuedMessages(state *interactiveState, reason err
 	state.mu.Unlock()
 	for _, q := range remaining {
 		e.send(q.platform, q.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), reason))
+	}
+}
+
+// notifyStoppedQueuedMessages drains pendingMessages after a user-initiated
+// stop and tells each sender their message was not run. Queued messages are
+// deliberately not executed: /stop is an emergency brake, and a queued
+// follow-up ("now push it") may depend on the very turn that was stopped.
+// Quoting the message lets the sender resend it if it is still wanted.
+func (e *Engine) notifyStoppedQueuedMessages(state *interactiveState) {
+	state.mu.Lock()
+	remaining := state.pendingMessages
+	state.pendingMessages = nil
+	state.mu.Unlock()
+	for _, q := range remaining {
+		preview := strings.Join(strings.Fields(q.content), " ")
+		if preview == "" {
+			preview = "📎"
+		}
+		preview = truncateIf(preview, 80)
+		e.send(q.platform, q.replyCtx, e.i18n.Tf(MsgQueuedMessageNotRun, preview))
 	}
 }
 
@@ -11076,7 +11178,7 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 			pending.resolve()
 		}
 		if notifyQueued {
-			e.notifyDroppedQueuedMessages(state, fmt.Errorf("session cancelled"))
+			e.notifyStoppedQueuedMessages(state)
 		} else {
 			state.mu.Lock()
 			state.pendingMessages = nil
@@ -11117,7 +11219,7 @@ normalCleanup:
 		pending.resolve()
 	}
 	if notifyQueued {
-		e.notifyDroppedQueuedMessages(state, fmt.Errorf("session reset"))
+		e.notifyStoppedQueuedMessages(state)
 	} else {
 		state.mu.Lock()
 		state.pendingMessages = nil
