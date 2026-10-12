@@ -623,7 +623,7 @@ func TestProcessInteractiveEvents_ReturnsUnknownOnNonRetriable(t *testing.T) {
 	sent := p.getSent()
 	sawError := false
 	for _, s := range sent {
-		if strings.Contains(s, "Error") || strings.Contains(s, "错误") {
+		if strings.Contains(s, "something went wrong") {
 			sawError = true
 		}
 	}
@@ -777,7 +777,7 @@ func TestRetryLoop_GivesUpAtCap(t *testing.T) {
 	for {
 		sent := p.getSent()
 		for _, s := range sent {
-			if strings.Contains(s, "did not clear") || strings.Contains(s, "gave up") || strings.Contains(s, "未解除") {
+			if strings.Contains(s, "still busy after") {
 				goto done
 			}
 		}

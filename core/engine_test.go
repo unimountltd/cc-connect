@@ -11144,7 +11144,7 @@ func TestEventIdleTimeout_CleansUpSession(t *testing.T) {
 	sent := p.getSent()
 	foundTimeout := false
 	for _, s := range sent {
-		if strings.Contains(s, "timed out") {
+		if strings.Contains(s, "stopped responding") {
 			foundTimeout = true
 		}
 	}
@@ -11196,7 +11196,7 @@ func TestEventIdleTimeout_ResetOnEvent(t *testing.T) {
 	sent := p.getSent()
 	foundTimeout := false
 	for _, s := range sent {
-		if strings.Contains(s, "timed out") {
+		if strings.Contains(s, "stopped responding") {
 			foundTimeout = true
 		}
 	}
@@ -14359,17 +14359,19 @@ func TestUnsolicitedReader_SetsResyncOnEventError(t *testing.T) {
 		t.Error("expected eventsNeedResync=true after EventError")
 	}
 
-	// Verify error was relayed to platform.
+	// Verify a friendly notice (not the raw error) was relayed to platform.
 	sent := p.getSent()
 	found := false
 	for _, s := range sent {
 		if strings.Contains(s, "something broke") {
+			t.Errorf("raw agent error leaked to platform: %v", sent)
+		}
+		if strings.Contains(s, "something went wrong") {
 			found = true
-			break
 		}
 	}
 	if !found {
-		t.Errorf("expected error to be relayed to platform, got %v", sent)
+		t.Errorf("expected failure notice to be relayed to platform, got %v", sent)
 	}
 }
 

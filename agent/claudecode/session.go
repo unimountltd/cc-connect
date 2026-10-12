@@ -39,6 +39,7 @@ type claudeSession struct {
 	sessionID       atomic.Value    // stores string
 	permissionMode  atomic.Value    // stores string
 	autoApprove     atomic.Bool
+	quotaRejected   atomic.Bool // last rate_limit_event reported status "rejected" (plan quota exhausted)
 	acceptEditsOnly atomic.Bool
 	dontAsk         atomic.Bool
 	workDir         string
@@ -630,6 +631,8 @@ func (cs *claudeSession) handleReadLoopLine(line string) {
 		cs.handleUser(raw)
 	case "result":
 		cs.handleResult(raw)
+	case "rate_limit_event":
+		cs.handleRateLimitEvent(raw)
 	case "control_request":
 		cs.handleControlRequest(raw)
 	case "control_cancel_request":
@@ -644,6 +647,31 @@ func (cs *claudeSession) handleReadLoopLine(line string) {
 		// than the top-level event type.
 		slog.Debug("claudeSession: unrecognized event type", "type", eventType, "raw", raw)
 	}
+}
+
+// handleRateLimitEvent tracks Claude Code's structured quota status. The CLI
+// emits {"type":"rate_limit_event","rate_limit_info":{"status":...}} with
+// status "allowed", "allowed_warning" or "rejected"; "rejected" means the
+// plan quota is exhausted and the next error result is a quota failure.
+func (cs *claudeSession) handleRateLimitEvent(raw map[string]any) {
+	info, _ := raw["rate_limit_info"].(map[string]any)
+	status, _ := info["status"].(string)
+	slog.Debug("claudeSession: rate limit event", "status", status, "info", info)
+	switch status {
+	case "rejected":
+		cs.quotaRejected.Store(true)
+	case "allowed", "allowed_warning":
+		cs.quotaRejected.Store(false)
+	}
+}
+
+// isQuotaMessage is a fallback for when no rate_limit_event preceded the
+// error result. It matches the CLI's fixed quota phrasing ("You've hit your
+// weekly limit", "You've reached your Fable limit") and nothing looser.
+func isQuotaMessage(msg string) bool {
+	low := strings.ToLower(msg)
+	return (strings.HasPrefix(low, "you've hit your ") || strings.HasPrefix(low, "you've reached your ")) &&
+		strings.Contains(low, "limit")
 }
 
 // isCompactionResult reports whether a `type:"result"` event is actually
@@ -856,6 +884,9 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 			errMsg = subtype
 		}
 		kind := core.ClassifyAnthropicError(content)
+		if kind == core.ErrorKindUnknown && (cs.quotaRejected.Load() || isQuotaMessage(errMsg)) {
+			kind = core.ErrorKindQuota
+		}
 		slog.Error("claudeSession: result error", "subtype", subtype, "is_error", isErr, "kind", kind, "msg", errMsg)
 		evt := core.Event{
 			Type:      core.EventError,

@@ -41,8 +41,8 @@ Listed roughly newest-first within each section. Commit hashes link to fork hist
 - **SDK self-fired wakeup forwarding (UNI-12 v2)** (`e3722cbd`, `81f89798`, `474b1ed9`)
   Claude Code's in-process `ScheduleWakeup` fires events while no user turn is in
   flight. The engine detects these via a per-session in-turn channel-lock, treats
-  them as orphan turns, renders each one to the messaging platform with a
-  "Scheduled wakeup" header, and answers any permission prompts inline (auto-allow
+  them as orphan turns, posts each turn's text response to the messaging platform
+  (no header; tool-only, NO_REPLY and failed turns post nothing), and answers any permission prompts inline (auto-allow
   in `bypassPermissions`, deny otherwise). Replaces a v1 parallel-scheduler approach
   that double-fired. Follow-ups harden the channel-lock state machine, fix
   multi-workspace lookup, and bypass the lock for startup `system` events.

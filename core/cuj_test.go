@@ -666,7 +666,7 @@ func TestCUJ_G1_LLMFailureSurfacesErrorToUser(t *testing.T) {
 	for {
 		sent := plat.getSent()
 		for _, s := range sent {
-			if strings.Contains(s, "failed to start") || strings.Contains(s, "❌") {
+			if strings.Contains(s, "Couldn't start the assistant") {
 				return
 			}
 		}
@@ -1847,7 +1847,7 @@ func TestCUJ_G4_AgentCrashReturnsErrorAndRecovers(t *testing.T) {
 		return len(env.plat.getSent()) >= 1
 	})
 
-	if !env.sentContains("failed to start agent session") && !env.sentContains("无法") {
+	if !env.sentContains("Couldn't start the assistant") || env.sentContains("agent binary not found") {
 		t.Fatalf("user did not see an agent-start failure message; got: %v", env.plat.getSent())
 	}
 
@@ -1861,7 +1861,7 @@ func TestCUJ_G4_AgentCrashReturnsErrorAndRecovers(t *testing.T) {
 		return len(env.plat.getSent()) >= 1
 	})
 
-	if env.sentContains("agent binary not found") || env.sentContains("failed to start agent session") {
+	if env.sentContains("agent binary not found") || env.sentContains("Couldn't start the assistant") {
 		t.Fatalf("user still sees crash error after recovery; got: %v", env.plat.getSent())
 	}
 
@@ -1915,8 +1915,12 @@ func TestCUJ_G5_ToolFailureSurfacesToUser(t *testing.T) {
 		return len(env.plat.getSent()) >= 1
 	})
 
-	if !env.sentContains("permission denied") && !env.sentContains("bash tool exited") {
-		t.Fatalf("user did not see the underlying tool error in reply; got: %v", env.plat.getSent())
+	// The user sees a friendly failure notice, never the raw agent error.
+	if !env.sentContains("something went wrong") {
+		t.Fatalf("user did not see a failure notice; got: %v", env.plat.getSent())
+	}
+	if env.sentContains("permission denied") || env.sentContains("bash tool exited") {
+		t.Fatalf("raw agent error leaked to user; got: %v", env.plat.getSent())
 	}
 }
 

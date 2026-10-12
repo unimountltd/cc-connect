@@ -11,8 +11,8 @@ import (
 // surfaces events arriving outside an active Send() turn — Claude Code's
 // in-process ScheduleWakeup self-fires being the canonical case. The engine
 // starts one orphan handler goroutine per session that drains this channel
-// and renders each idle turn to the user's messaging platform with a wakeup
-// header, so the user sees what the agent did instead of the response getting
+// and renders each idle turn's text response to the user's messaging
+// platform, so the user sees what the agent did instead of the response getting
 // silently dropped on the floor.
 //
 // Lifecycle: the orphan handler runs until the OrphanEvents channel closes
@@ -77,17 +77,19 @@ func (e *Engine) orphanLoop(state *interactiveState, ch <-chan Event) {
 				turn.text = append(turn.text, evt.Content)
 			}
 		case EventResult:
-			e.flushOrphanTurn(state, turn, nil)
+			e.flushOrphanTurn(state, turn)
 			turn = newOrphanTurn()
 		case EventError:
-			e.flushOrphanTurn(state, turn, evt.Error)
+			// The user didn't ask for this turn, so a failure is logged
+			// only — nothing is posted.
+			slog.Error("orphan: agent error, dropping wakeup turn", "error", evt.Error, "kind", evt.ErrorKind)
 			turn = newOrphanTurn()
 		}
 	}
 	// Channel closed (session ended). Flush any pending turn so partial
 	// output isn't silently dropped on subprocess exit.
 	if !turn.empty() {
-		e.flushOrphanTurn(state, turn, nil)
+		e.flushOrphanTurn(state, turn)
 	}
 }
 
@@ -138,11 +140,10 @@ func (e *Engine) respondOrphanPermission(state *interactiveState, evt Event) {
 
 // flushOrphanTurn renders one completed orphan turn to the platform. It waits
 // briefly for the cc-connect session lock so a real user turn already in
-// flight finishes first, then sends a single message with a wakeup header
-// followed by the model's text response (and a brief tool-use summary when
-// the model used tools). errOpt is non-nil when the turn ended in EventError.
-func (e *Engine) flushOrphanTurn(state *interactiveState, turn *orphanTurn, errOpt error) {
-	if state == nil || turn.empty() && errOpt == nil {
+// flight finishes first, then sends the model's text response as-is. Turns
+// with no text (tool-only or NO_REPLY) send nothing.
+func (e *Engine) flushOrphanTurn(state *interactiveState, turn *orphanTurn) {
+	if state == nil || turn.empty() {
 		return
 	}
 
@@ -168,7 +169,7 @@ func (e *Engine) flushOrphanTurn(state *interactiveState, turn *orphanTurn, errO
 		replyCtx = rc
 	}
 
-	body := buildOrphanRender(turn, errOpt)
+	body := buildOrphanRender(turn)
 	if body == "" {
 		return
 	}
@@ -243,41 +244,19 @@ func (sm *SessionManager) byKey(key string) *Session {
 	return nil
 }
 
-// buildOrphanRender formats the wakeup header and the agent's response into a
-// single message body suitable for a platform Send. Kept centralized so the
-// header style is consistent and easy to tweak.
-func buildOrphanRender(turn *orphanTurn, errOpt error) string {
+// buildOrphanRender returns the text to post for a wakeup turn: the model's
+// response with no wakeup header or tool summary, or "" when there is nothing
+// worth posting (tool-only turn, or the model chose NO_REPLY).
+func buildOrphanRender(turn *orphanTurn) string {
 	body := strings.TrimSpace(strings.Join(turn.text, ""))
-	header := "💤 *Scheduled wakeup*"
-	if turn.toolCount > 0 {
-		header += fmt.Sprintf(" — used %d tool%s", turn.toolCount, plural(turn.toolCount))
-	}
-	if errOpt != nil {
-		return header + "\n_failed: " + errOpt.Error() + "_"
-	}
 	// Honor NO_REPLY like a normal turn: a bare marker means the agent chose
-	// silence (common for idle wakeups), so render nothing — not even the
-	// header. A trailing marker after real text is stripped.
+	// silence (common for idle wakeups). A trailing marker after real text
+	// is stripped.
 	if isSilentReply(body) {
 		return ""
 	}
 	if stripped, ok := stripTrailingSilent(body); ok {
-		body = stripped
+		body = strings.TrimSpace(stripped)
 	}
-	if body == "" {
-		// Tool-only turn with no text response; still let the user know the
-		// model woke up so context divergence is visible.
-		if turn.toolCount > 0 {
-			return header + "\n_(no text response)_"
-		}
-		return ""
-	}
-	return header + "\n" + body
-}
-
-func plural(n int) string {
-	if n == 1 {
-		return ""
-	}
-	return "s"
+	return body
 }

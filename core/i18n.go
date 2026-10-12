@@ -565,6 +565,14 @@ const (
 	MsgAgentRateLimitedRetry  MsgKey = "agent_rate_limited_retry"
 	MsgAgentRateLimitedGaveUp MsgKey = "agent_rate_limited_gave_up"
 
+	// User-facing replacements for raw agent errors. Raw error text is
+	// logged, never shown, so chat users don't see CLI/vendor internals.
+	MsgAgentFailed          MsgKey = "agent_failed"
+	MsgAgentQuotaExhausted  MsgKey = "agent_quota_exhausted"
+	MsgAgentTimedOut        MsgKey = "agent_timed_out"
+	MsgAgentTurnTooLong     MsgKey = "agent_turn_too_long"
+	MsgQueuedMessageDropped MsgKey = "queued_message_dropped"
+
 	MsgPsSent       MsgKey = "ps_sent"
 	MsgPsSendFailed MsgKey = "ps_send_failed"
 	MsgPsEmpty      MsgKey = "ps_empty"
@@ -931,11 +939,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "⚠️ Sesión expirada. Usa /new para iniciar una nueva conversación.",
 	},
 	MsgFailedToStartAgentSession: {
-		LangEnglish:            "❌ Error: failed to start agent session",
-		LangChinese:            "❌ 错误: 启动 Agent 会话失败",
-		LangTraditionalChinese: "❌ 錯誤: 啟動 Agent 會話失敗",
-		LangJapanese:           "❌ エラー: Agentセッションの起動に失敗しました",
-		LangSpanish:            "❌ Error: error al iniciar la sesión del agente",
+		LangEnglish:            "⚠️ Couldn't start the assistant. Please try again in a moment.",
+		LangChinese:            "⚠️ 无法启动助手，请稍后再试。",
+		LangTraditionalChinese: "⚠️ 無法啟動助手，請稍後再試。",
+		LangJapanese:           "⚠️ アシスタントを起動できませんでした。しばらくしてからもう一度お試しください。",
+		LangSpanish:            "⚠️ No se pudo iniciar el asistente. Inténtalo de nuevo en un momento.",
 	},
 	MsgFailedToDeleteSession: {
 		LangEnglish:            "❌ %s: %v",
@@ -3524,19 +3532,55 @@ var messages = map[MsgKey]map[Language]string{
 	},
 	MsgAgentRateLimitedRetry: {
 		// args: attempt (int), maxAttempts (int), delaySeconds (int)
-		LangEnglish:            "⏳ Claude rate limited. Retry %d/%d in %ds…",
-		LangChinese:            "⏳ Claude 被限流。%d/%d 次重试将在 %d 秒后进行…",
-		LangTraditionalChinese: "⏳ Claude 被限流。%d/%d 次重試將在 %d 秒後進行…",
-		LangJapanese:           "⏳ Claude がレート制限されました。%d/%d 回目の再試行を %d 秒後に実行します…",
-		LangSpanish:            "⏳ Claude con límite de tasa. Reintento %d/%d en %d s…",
+		LangEnglish:            "⏳ The assistant is busy right now. Retry %d/%d in %ds…",
+		LangChinese:            "⏳ 助手当前繁忙。%d/%d 次重试将在 %d 秒后进行…",
+		LangTraditionalChinese: "⏳ 助手目前忙碌中。%d/%d 次重試將在 %d 秒後進行…",
+		LangJapanese:           "⏳ アシスタントが混み合っています。%d/%d 回目の再試行を %d 秒後に実行します…",
+		LangSpanish:            "⏳ El asistente está ocupado. Reintento %d/%d en %d s…",
 	},
 	MsgAgentRateLimitedGaveUp: {
 		// args: attempts (int), minutes (int)
-		LangEnglish:            "⚠️ Claude rate limit did not clear after %d attempts over ~%d min. Please try again later.",
-		LangChinese:            "⚠️ 经过 %d 次尝试（约 %d 分钟），Claude 限流仍未解除。请稍后再试。",
-		LangTraditionalChinese: "⚠️ 經過 %d 次嘗試（約 %d 分鐘），Claude 限流仍未解除。請稍後再試。",
-		LangJapanese:           "⚠️ %d 回の再試行（約 %d 分）を経ても Claude のレート制限が解除されませんでした。後でもう一度お試しください。",
-		LangSpanish:            "⚠️ El límite de tasa de Claude no se resolvió tras %d intentos (~%d min). Inténtalo más tarde.",
+		LangEnglish:            "⚠️ The assistant is still busy after %d attempts over ~%d min. Please try again later.",
+		LangChinese:            "⚠️ 经过 %d 次尝试（约 %d 分钟），助手仍然繁忙。请稍后再试。",
+		LangTraditionalChinese: "⚠️ 經過 %d 次嘗試（約 %d 分鐘），助手仍然忙碌。請稍後再試。",
+		LangJapanese:           "⚠️ %d 回の再試行（約 %d 分）を経てもアシスタントが混み合っています。後でもう一度お試しください。",
+		LangSpanish:            "⚠️ El asistente sigue ocupado tras %d intentos (~%d min). Inténtalo más tarde.",
+	},
+	MsgAgentFailed: {
+		LangEnglish:            "⚠️ Sorry, something went wrong while working on that. Please try again in a moment.",
+		LangChinese:            "⚠️ 抱歉，处理时出了点问题。请稍后再试。",
+		LangTraditionalChinese: "⚠️ 抱歉，處理時出了點問題。請稍後再試。",
+		LangJapanese:           "⚠️ 申し訳ありません。処理中に問題が発生しました。しばらくしてからもう一度お試しください。",
+		LangSpanish:            "⚠️ Lo siento, algo salió mal al procesarlo. Inténtalo de nuevo en un momento.",
+	},
+	MsgAgentQuotaExhausted: {
+		LangEnglish:            "⏳ The assistant has reached its usage limit for now. Please try again later.",
+		LangChinese:            "⏳ 助手暂时已达到使用上限，请稍后再试。",
+		LangTraditionalChinese: "⏳ 助手暫時已達到使用上限，請稍後再試。",
+		LangJapanese:           "⏳ アシスタントは現在利用上限に達しています。後でもう一度お試しください。",
+		LangSpanish:            "⏳ El asistente alcanzó su límite de uso por ahora. Inténtalo más tarde.",
+	},
+	MsgAgentTimedOut: {
+		LangEnglish:            "⚠️ The assistant stopped responding. Please send your message again.",
+		LangChinese:            "⚠️ 助手没有响应，请重新发送消息。",
+		LangTraditionalChinese: "⚠️ 助手沒有回應，請重新傳送訊息。",
+		LangJapanese:           "⚠️ アシスタントが応答しなくなりました。もう一度メッセージを送信してください。",
+		LangSpanish:            "⚠️ El asistente dejó de responder. Envía tu mensaje de nuevo.",
+	},
+	MsgAgentTurnTooLong: {
+		// args: max turn time (time.Duration)
+		LangEnglish:            "⏱️ That request ran longer than the %v limit, so it was stopped.",
+		LangChinese:            "⏱️ 该请求运行超过 %v 的上限，已被停止。",
+		LangTraditionalChinese: "⏱️ 該請求執行超過 %v 的上限，已被停止。",
+		LangJapanese:           "⏱️ リクエストが上限の %v を超えたため停止しました。",
+		LangSpanish:            "⏱️ La solicitud superó el límite de %v y se detuvo.",
+	},
+	MsgQueuedMessageDropped: {
+		LangEnglish:            "⚠️ Your queued message couldn't be processed. Please send it again.",
+		LangChinese:            "⚠️ 您排队的消息未能处理，请重新发送。",
+		LangTraditionalChinese: "⚠️ 您排隊的訊息未能處理，請重新傳送。",
+		LangJapanese:           "⚠️ 待機中のメッセージを処理できませんでした。もう一度送信してください。",
+		LangSpanish:            "⚠️ Tu mensaje en cola no se pudo procesar. Envíalo de nuevo.",
 	},
 	MsgPsSent: {
 		LangEnglish:            "✅ P.S. delivered.",

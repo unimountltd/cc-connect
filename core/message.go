@@ -470,6 +470,7 @@ const (
 	ErrorKindUnknown    ErrorKind = ""           // not classified; use default error surface
 	ErrorKindRateLimit  ErrorKind = "rate_limit" // HTTP 429 / Anthropic rate_limit_error — retriable
 	ErrorKindOverloaded ErrorKind = "overloaded" // HTTP 529 / Anthropic overloaded_error — retriable
+	ErrorKindQuota      ErrorKind = "quota"      // plan/usage quota exhausted — not retriable until the quota resets
 )
 
 // UserQuestion represents a structured question from AskUserQuestion.

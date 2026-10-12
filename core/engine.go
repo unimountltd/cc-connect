@@ -3397,7 +3397,7 @@ func (e *Engine) drainOrphanedQueue(session *Session, sessions *SessionManager, 
 
 	if !hasState || state == nil || state.agentSession == nil || !state.agentSession.Alive() {
 		if hasState && state != nil {
-			e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent session ended"))
+			e.notifyDroppedQueuedMessages(state, ErrorKindUnknown, fmt.Errorf("agent session ended"))
 		}
 		return
 	}
@@ -3550,7 +3550,7 @@ found:
 			UpdatedInput: updatedInput,
 		}); err != nil {
 			slog.Error("failed to send AskUserQuestion response", "error", err)
-			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+			e.reply(p, msg.ReplyCtx, e.agentErrorText(ErrorKindUnknown, err))
 		} else {
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf("✅ %s: **%s**", q.Question, answer))
 		}
@@ -3574,7 +3574,7 @@ found:
 			UpdatedInput: pending.ToolInput,
 		}); err != nil {
 			slog.Error("failed to send permission response", "error", err)
-			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+			e.reply(p, msg.ReplyCtx, e.agentErrorText(ErrorKindUnknown, err))
 		} else {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPermissionApproveAll))
 		}
@@ -3584,7 +3584,7 @@ found:
 			UpdatedInput: pending.ToolInput,
 		}); err != nil {
 			slog.Error("failed to send permission response", "error", err)
-			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+			e.reply(p, msg.ReplyCtx, e.agentErrorText(ErrorKindUnknown, err))
 		} else {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPermissionAllowed))
 		}
@@ -4554,7 +4554,7 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 			pending.resolve()
 		}
 
-		e.notifyDroppedQueuedMessages(state, fmt.Errorf("session reset"))
+		e.notifyDroppedQueuedMessages(state, ErrorKindUnknown, fmt.Errorf("session reset"))
 	}
 
 	// Close the agent session BEFORE deleting from the map.
@@ -4687,7 +4687,7 @@ func (e *Engine) closeIdleInteractiveState(sessionKey string, expected *interact
 	if pending != nil {
 		pending.resolve()
 	}
-	e.notifyDroppedQueuedMessages(state, fmt.Errorf("session reset"))
+	e.notifyDroppedQueuedMessages(state, ErrorKindUnknown, fmt.Errorf("session reset"))
 
 	e.closeAgentSessionWithTimeout(sessionKey, agentSession, closePlatform, closeReplyCtx)
 
@@ -5253,8 +5253,8 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 
 			case EventError:
 				if event.Error != nil {
-					slog.Error("unsolicited agent error", "error", event.Error, "session", sessionKey)
-					e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
+					slog.Error("unsolicited agent error", "error", event.Error, "kind", event.ErrorKind, "session", sessionKey)
+					e.send(p, replyCtx, e.agentErrorText(event.ErrorKind, event.Error))
 				}
 				state.mu.Lock()
 				state.eventsNeedResync = true
@@ -5272,6 +5272,23 @@ type agentErrorHandler struct {
 
 var agentErrorHandlers = []agentErrorHandler{
 	{"Session not found", MsgSessionNotFound},
+}
+
+// agentErrorText turns an agent failure into a message safe to show chat
+// users. Raw agent/CLI error text is logged by callers but never echoed: it
+// leaks vendor names, billing links and internals end users can't act on.
+func (e *Engine) agentErrorText(kind ErrorKind, err error) string {
+	if kind == ErrorKindQuota {
+		return e.i18n.T(MsgAgentQuotaExhausted)
+	}
+	if err != nil {
+		for _, h := range agentErrorHandlers {
+			if strings.Contains(err.Error(), h.contains) {
+				return e.i18n.T(h.msgKey)
+			}
+		}
+	}
+	return e.i18n.T(MsgAgentFailed)
 }
 
 // processInteractiveEvents runs the event loop for a single turn. When the
@@ -5451,14 +5468,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					stopTyping()
 					stopTyping = nil
 				}
-				e.notifyDroppedQueuedMessages(state, err)
+				e.notifyDroppedQueuedMessages(state, ErrorKindUnknown, err)
 				if state.agentSession == nil || !state.agentSession.Alive() {
 					e.cleanupInteractiveState(sessionKey, state)
 				}
 				state.mu.Lock()
 				p := state.platform
 				state.mu.Unlock()
-				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+				e.send(p, replyCtx, e.agentErrorText(ErrorKindUnknown, err))
 				return
 			}
 			continue
@@ -5483,7 +5500,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.eventsNeedResync = true
 			p := state.platform
 			state.mu.Unlock()
-			e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session timed out (no response)"))
+			e.send(p, replyCtx, e.i18n.T(MsgAgentTimedOut))
 			e.cleanupInteractiveState(sessionKey, state)
 			return
 		case <-turnDeadlineCh:
@@ -5495,8 +5512,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.mu.Lock()
 			p := state.platform
 			state.mu.Unlock()
-			e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError),
-				fmt.Sprintf("agent turn exceeded maximum time (%v), stopping", e.maxTurnTime)))
+			e.send(p, replyCtx, e.i18n.Tf(MsgAgentTurnTooLong, e.maxTurnTime))
 
 			// Two-phase shutdown: first try a graceful stop so the agent can
 			// write its final state before dying (preserves --resume ability).
@@ -6736,8 +6752,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 			}
 			if event.Error != nil {
-				errMsg := event.Error.Error()
-				slog.Error("agent error", "error", event.Error)
+				slog.Error("agent error", "error", event.Error, "kind", event.ErrorKind)
 				e.emitTurnTelemetry(state, tmCtx, event, toolNames, toolCount, time.Since(turnStart), "", true, string(event.ErrorKind))
 				e.hooks.Emit(HookEvent{
 					Event:      HookEventError,
@@ -6745,20 +6760,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					Platform:   p.Name(),
 					Error:      event.Error.Error(),
 				})
-				userMsg := fmt.Sprintf(e.i18n.T(MsgError), errMsg)
-				for _, h := range agentErrorHandlers {
-					if strings.Contains(errMsg, h.contains) {
-						userMsg = e.i18n.T(h.msgKey)
-						break
-					}
-				}
-				e.send(p, replyCtx, userMsg)
+				e.send(p, replyCtx, e.agentErrorText(event.ErrorKind, event.Error))
 			}
 			// Only drop queued messages if the agent session is dead.
 			// Some agents (e.g. Codex) emit EventError for per-turn failures
 			// while keeping the session alive for subsequent turns.
 			if state.agentSession == nil || !state.agentSession.Alive() {
-				e.notifyDroppedQueuedMessages(state, event.Error)
+				e.notifyDroppedQueuedMessages(state, event.ErrorKind, event.Error)
 			}
 			reactCompletion(false)
 			return
@@ -6771,7 +6779,7 @@ channelClosed:
 	state.mu.Lock()
 	state.eventsNeedResync = true
 	state.mu.Unlock()
-	e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent process exited"))
+	e.notifyDroppedQueuedMessages(state, ErrorKindUnknown, fmt.Errorf("agent process exited"))
 	e.cleanupInteractiveState(sessionKey, state)
 	reactCompletion(false)
 
@@ -6883,13 +6891,24 @@ func mergeRichToolResult(steps []ToolStep, event Event, result string, maxLen in
 // sends an error notification to each queued message's sender. Called when
 // the event loop exits abnormally (EventError, channel closed) and queued
 // messages can no longer be delivered to the agent.
-func (e *Engine) notifyDroppedQueuedMessages(state *interactiveState, reason error) {
+//
+// reason is logged only; senders get a friendly notice (or the quota notice
+// when kind is ErrorKindQuota) rather than raw agent internals.
+func (e *Engine) notifyDroppedQueuedMessages(state *interactiveState, kind ErrorKind, reason error) {
 	state.mu.Lock()
 	remaining := state.pendingMessages
 	state.pendingMessages = nil
 	state.mu.Unlock()
+	if len(remaining) == 0 {
+		return
+	}
+	slog.Warn("dropping queued messages", "count", len(remaining), "kind", kind, "reason", reason)
+	text := e.i18n.T(MsgQueuedMessageDropped)
+	if kind == ErrorKindQuota {
+		text = e.i18n.T(MsgAgentQuotaExhausted)
+	}
 	for _, q := range remaining {
-		e.send(q.platform, q.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), reason))
+		e.send(q.platform, q.replyCtx, text)
 	}
 }
 
@@ -6960,8 +6979,8 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		as := state.agentSession // capture under lock to avoid race with cleanup (mirrors #1436)
 		state.mu.Unlock()
 		if as == nil || !as.Alive() {
-			e.send(queued.platform, queued.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session ended"))
-			e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent session ended"))
+			e.send(queued.platform, queued.replyCtx, e.i18n.T(MsgQueuedMessageDropped))
+			e.notifyDroppedQueuedMessages(state, ErrorKindUnknown, fmt.Errorf("agent session ended"))
 			return false
 		}
 
@@ -11311,8 +11330,9 @@ func (e *Engine) runCompress(state *interactiveState, session *Session, sessions
 
 	cmd := compressor.CompressCommand()
 	if err := state.agentSession.Send(cmd, "", nil, nil); err != nil {
+		slog.Error("compress: send failed", "error", err)
 		if !auto {
-			e.reply(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+			e.reply(p, replyCtx, e.agentErrorText(ErrorKindUnknown, err))
 		}
 		if !state.agentSession.Alive() {
 			e.cleanupInteractiveState(iKey)
@@ -11357,7 +11377,7 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 						e.reply(p, replyCtx, e.i18n.T(MsgCompressDone))
 					}
 				}
-				e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent process exited during compress"))
+				e.notifyDroppedQueuedMessages(state, ErrorKindUnknown, fmt.Errorf("agent process exited during compress"))
 				return
 			}
 		case <-idleCh:
@@ -11365,7 +11385,7 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "compress timed out"))
 			}
 			e.cleanupInteractiveState(sessionKey, state)
-			e.notifyDroppedQueuedMessages(state, fmt.Errorf("compress timed out"))
+			e.notifyDroppedQueuedMessages(state, ErrorKindUnknown, fmt.Errorf("compress timed out"))
 			return
 		case <-e.ctx.Done():
 			return
@@ -11422,13 +11442,16 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 			e.drainQueuedMessagesAfterCompress(state, session, sessions, sessionKey, unlocked)
 			return
 		case EventError:
-			if !auto && event.Error != nil {
-				e.reply(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
+			if event.Error != nil {
+				slog.Error("compress: agent error", "error", event.Error, "kind", event.ErrorKind)
+				if !auto {
+					e.reply(p, replyCtx, e.agentErrorText(event.ErrorKind, event.Error))
+				}
 			}
 			// Only drop queued messages if the agent is dead; some agents
 			// emit per-turn EventError while staying alive.
 			if !state.agentSession.Alive() {
-				e.notifyDroppedQueuedMessages(state, event.Error)
+				e.notifyDroppedQueuedMessages(state, event.ErrorKind, event.Error)
 			} else {
 				// Agent survived — try to process queued messages.
 				e.drainQueuedMessagesAfterCompress(state, session, sessions, sessionKey, unlocked)

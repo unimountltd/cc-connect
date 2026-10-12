@@ -3,7 +3,6 @@ package core
 import (
 	"context"
 	"errors"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -81,10 +80,10 @@ func newOrphanTestEngine(t *testing.T, plat Platform, sess AgentSession) (*Engin
 	return e, state
 }
 
-// TestOrphanLoop_RendersTextWithWakeupHeader verifies the happy path: a
-// text-only orphan turn is delivered as a single platform message with the
-// wakeup header and the model's response body.
-func TestOrphanLoop_RendersTextWithWakeupHeader(t *testing.T) {
+// TestOrphanLoop_RendersBareText verifies the happy path: a
+// text-only orphan turn is delivered as a single platform message containing
+// just the model's response body.
+func TestOrphanLoop_RendersBareText(t *testing.T) {
 	plat := &orphanReplyCtxPlatform{stubPlatformEngine: stubPlatformEngine{n: "slack"}}
 	sess := newOrphanFakeSession()
 	e, state := newOrphanTestEngine(t, plat, sess)
@@ -106,11 +105,8 @@ func TestOrphanLoop_RendersTextWithWakeupHeader(t *testing.T) {
 	if len(sent) == 0 {
 		t.Fatal("no message sent to platform")
 	}
-	if !strings.Contains(sent[0], "Scheduled wakeup") {
-		t.Errorf("expected wakeup header in output: %q", sent[0])
-	}
-	if !strings.Contains(sent[0], "wakeup ran the build, all green") {
-		t.Errorf("expected response body in output: %q", sent[0])
+	if sent[0] != "wakeup ran the build, all green" {
+		t.Errorf("expected bare response body (no wakeup header), got %q", sent[0])
 	}
 }
 
@@ -180,32 +176,23 @@ func TestOrphanLoop_PermissionRequestRespondedInline(t *testing.T) {
 	})
 }
 
-// TestOrphanLoop_ToolUseSummary verifies the header notes the tool count
-// when the model used tools but produced no text response.
-func TestOrphanLoop_ToolUseSummary(t *testing.T) {
+// TestOrphanLoop_ToolOnlyTurnSilent verifies a wakeup turn that used tools
+// but produced no text posts nothing.
+func TestOrphanLoop_ToolOnlyTurnSilent(t *testing.T) {
 	plat := &orphanReplyCtxPlatform{stubPlatformEngine: stubPlatformEngine{n: "slack"}}
 	sess := newOrphanFakeSession()
 	e, state := newOrphanTestEngine(t, plat, sess)
-	go e.orphanLoop(state, sess.orphanEvents)
+	done := make(chan struct{})
+	go func() { e.orphanLoop(state, sess.orphanEvents); close(done) }()
 
 	sess.orphanEvents <- Event{Type: EventToolUse, ToolName: "Bash"}
 	sess.orphanEvents <- Event{Type: EventToolUse, ToolName: "Read"}
 	sess.orphanEvents <- Event{Type: EventResult, Done: true}
 	close(sess.orphanEvents)
+	<-done
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if len(plat.getSent()) > 0 {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	sent := plat.getSent()
-	if len(sent) == 0 {
-		t.Fatal("tool-only orphan turn produced no output (expected a no-text notice)")
-	}
-	if !strings.Contains(sent[0], "used 2 tools") {
-		t.Errorf("expected tool count in header: %q", sent[0])
+	if sent := plat.getSent(); len(sent) != 0 {
+		t.Fatalf("tool-only wakeup turn should post nothing, got %v", sent)
 	}
 }
 
@@ -227,31 +214,22 @@ func TestOrphanLoop_EmptyTurnSkipped(t *testing.T) {
 	}
 }
 
-// TestOrphanLoop_ErrorTurnRendered verifies that a turn ending with
-// EventError surfaces the failure to the user instead of dropping silently.
-func TestOrphanLoop_ErrorTurnRendered(t *testing.T) {
+// TestOrphanLoop_ErrorTurnSilent verifies a wakeup turn ending in EventError
+// posts nothing (the user didn't ask for it; the error is logged only).
+func TestOrphanLoop_ErrorTurnSilent(t *testing.T) {
 	plat := &orphanReplyCtxPlatform{stubPlatformEngine: stubPlatformEngine{n: "slack"}}
 	sess := newOrphanFakeSession()
 	e, state := newOrphanTestEngine(t, plat, sess)
-	go e.orphanLoop(state, sess.orphanEvents)
+	done := make(chan struct{})
+	go func() { e.orphanLoop(state, sess.orphanEvents); close(done) }()
 
 	sess.orphanEvents <- Event{Type: EventText, Content: "starting work..."}
 	sess.orphanEvents <- Event{Type: EventError, Error: errors.New("rate limited")}
 	close(sess.orphanEvents)
+	<-done
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if len(plat.getSent()) > 0 {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	sent := plat.getSent()
-	if len(sent) == 0 {
-		t.Fatal("error turn produced no output")
-	}
-	if !strings.Contains(sent[0], "rate limited") {
-		t.Errorf("expected error message in output: %q", sent[0])
+	if sent := plat.getSent(); len(sent) != 0 {
+		t.Fatalf("failed wakeup turn should post nothing, got %v", sent)
 	}
 }
 
@@ -267,69 +245,27 @@ func TestStartOrphanHandlerForSession_NoOpForNonEmitter(t *testing.T) {
 	e.startOrphanHandlerForSession(state)
 }
 
-// TestBuildOrphanRender_HeaderShape spot-checks the rendered header so the
-// user-facing text doesn't drift silently. Pure function — no I/O.
-func TestBuildOrphanRender_HeaderShape(t *testing.T) {
+// TestBuildOrphanRender_NoHeader verifies wakeup turns post only the model's
+// text — no "Scheduled wakeup" header or tool summary — and nothing at all
+// for tool-only or NO_REPLY turns. Pure function — no I/O.
+func TestBuildOrphanRender_NoHeader(t *testing.T) {
 	cases := []struct {
-		name     string
-		turn     *orphanTurn
-		err      error
-		want     string
-		wantNone bool
+		name string
+		turn *orphanTurn
+		want string
 	}{
-		{
-			name: "text only",
-			turn: &orphanTurn{text: []string{"all green"}},
-			want: "💤 *Scheduled wakeup*\nall green",
-		},
-		{
-			name: "with one tool",
-			turn: &orphanTurn{text: []string{"done"}, toolCount: 1, toolNames: []string{"Bash"}},
-			want: "💤 *Scheduled wakeup* — used 1 tool\ndone",
-		},
-		{
-			name: "with multiple tools",
-			turn: &orphanTurn{text: []string{"finished"}, toolCount: 3},
-			want: "💤 *Scheduled wakeup* — used 3 tools\nfinished",
-		},
-		{
-			name:     "empty",
-			turn:     &orphanTurn{},
-			wantNone: true,
-		},
-		{
-			name:     "bare NO_REPLY is silent",
-			turn:     &orphanTurn{text: []string{"NO_REPLY"}},
-			wantNone: true,
-		},
-		{
-			name:     "bare NO_REPLY after tools is silent",
-			turn:     &orphanTurn{text: []string{"\nno_reply\n"}, toolCount: 2},
-			wantNone: true,
-		},
-		{
-			name: "trailing NO_REPLY stripped",
-			turn: &orphanTurn{text: []string{"nothing new\nNO_REPLY"}},
-			want: "💤 *Scheduled wakeup*\nnothing new",
-		},
-		{
-			name: "error",
-			turn: &orphanTurn{},
-			err:  errors.New("boom"),
-			want: "💤 *Scheduled wakeup*\n_failed: boom_",
-		},
+		{"text only", &orphanTurn{text: []string{"all green"}}, "all green"},
+		{"with tools", &orphanTurn{text: []string{"done"}, toolCount: 1}, "done"},
+		{"tool only is silent", &orphanTurn{toolCount: 3}, ""},
+		{"empty", &orphanTurn{}, ""},
+		{"bare NO_REPLY is silent", &orphanTurn{text: []string{"NO_REPLY"}}, ""},
+		{"bare NO_REPLY after tools is silent", &orphanTurn{text: []string{"\nno_reply\n"}, toolCount: 2}, ""},
+		{"trailing NO_REPLY stripped", &orphanTurn{text: []string{"nothing new\nNO_REPLY"}}, "nothing new"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := buildOrphanRender(tc.turn, tc.err)
-			if tc.wantNone {
-				if got != "" {
-					t.Fatalf("want empty render, got %q", got)
-				}
-				return
-			}
-			if got != tc.want {
-				t.Fatalf("buildOrphanRender mismatch:\n got: %q\nwant: %q", got, tc.want)
+			if got := buildOrphanRender(tc.turn); got != tc.want {
+				t.Fatalf("buildOrphanRender = %q, want %q", got, tc.want)
 			}
 		})
 	}
