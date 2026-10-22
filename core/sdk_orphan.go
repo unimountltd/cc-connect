@@ -158,15 +158,17 @@ func (e *Engine) flushOrphanTurn(state *interactiveState, turn *orphanTurn) {
 		return
 	}
 
-	// Reconstruct replyCtx if the state cached one is stale or missing —
-	// the session may not have had a real user turn since startup.
-	if replyCtx == nil {
-		rc, err := reconstructOrphanReplyCtx(platform, sessionKey)
-		if err != nil {
-			slog.Warn("orphan: reconstruct replyCtx failed", "session_key", sessionKey, "error", err)
-			return
-		}
+	// Post wakeup turns at the session's home, not in whatever thread the
+	// last user message came from: the channel root for channel- or
+	// user-scoped sessions, the thread only for thread-scoped ones. The
+	// cached replyCtx keeps the last message's thread_ts, which buried
+	// wakeup replies in old threads (Kulcho #product, 21 Oct 2026).
+	// Fall back to the cached context only if reconstruction fails.
+	if rc, err := reconstructOrphanReplyCtx(platform, sessionKey); err == nil {
 		replyCtx = rc
+	} else if replyCtx == nil {
+		slog.Warn("orphan: reconstruct replyCtx failed", "session_key", sessionKey, "error", err)
+		return
 	}
 
 	body := buildOrphanRender(turn)

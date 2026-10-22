@@ -12352,6 +12352,7 @@ func (e *Engine) resolveSendTarget(sessionKey string, attachments bool) (sendTar
 		p = state.platform
 		replyCtx = state.replyCtx
 		state.mu.Unlock()
+		replyCtx = e.idleOutboundReplyCtx(state, p, replyCtx)
 	}
 
 	if p == nil && resolvedSessionKey != "" {
@@ -12599,6 +12600,34 @@ func videoFormatHint(v FileAttachment) string {
 	return audioFormatHint(v)
 }
 
+// idleOutboundReplyCtx picks where an external send (API/CLI
+// `cc-connect send`) lands when the target session has a live state.
+// While a turn is running, the cached context is right: the agent is
+// answering that message, so files and texts it sends belong in the same
+// thread. While the session is idle, the cached context is just the last
+// user message's, and for a channel-scoped Slack session that may be an
+// old thread; post at the session's home instead (channel root, or the
+// thread for thread-scoped keys), the same place wakeup turns go. Falls
+// back to the cached context when the platform cannot rebuild one.
+func (e *Engine) idleOutboundReplyCtx(state *interactiveState, p Platform, cached any) any {
+	if state == nil || p == nil {
+		return cached
+	}
+	state.mu.Lock()
+	busy := e.stateIsBusyLocked(state)
+	key := state.canonicalSessionKey
+	state.mu.Unlock()
+	if busy || key == "" {
+		return cached
+	}
+	rc, err := reconstructOrphanReplyCtx(p, key)
+	if err != nil {
+		slog.Debug("send: reconstruct replyCtx failed, using cached", "session_key", key, "error", err)
+		return cached
+	}
+	return rc
+}
+
 func (e *Engine) resolveOutboundSessionTarget(sessionKey string, hasAttachments bool) (*interactiveState, Platform, any, error) {
 	e.interactiveMu.Lock()
 
@@ -12638,6 +12667,7 @@ func (e *Engine) resolveOutboundSessionTarget(sessionKey string, hasAttachments 
 		p = state.platform
 		replyCtx = state.replyCtx
 		state.mu.Unlock()
+		replyCtx = e.idleOutboundReplyCtx(state, p, replyCtx)
 	}
 
 	// Fork: post-restart proactive delivery. No live interactiveState exists

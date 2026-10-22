@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -268,5 +269,176 @@ func TestBuildOrphanRender_NoHeader(t *testing.T) {
 				t.Fatalf("buildOrphanRender = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// slackLikeCtx mimics the Slack platform's reply context: a channel plus an
+// optional thread_ts. An empty threadTS means "post at channel root".
+type slackLikeCtx struct {
+	channel  string
+	threadTS string
+}
+
+// slackLikePlatform rebuilds reply contexts the way the Slack platform does
+// (slack:<ch> and slack:<ch>:<user> -> channel root, slack:<ch>:t:<ts> ->
+// that thread) and records the context of every Send.
+type slackLikePlatform struct {
+	stubPlatformEngine
+	failReconstruct bool
+	ctxMu           sync.Mutex
+	sentCtx         []any
+}
+
+func (p *slackLikePlatform) Send(ctx context.Context, rctx any, content string) error {
+	p.ctxMu.Lock()
+	p.sentCtx = append(p.sentCtx, rctx)
+	p.ctxMu.Unlock()
+	return p.stubPlatformEngine.Send(ctx, rctx, content)
+}
+
+func (p *slackLikePlatform) ReconstructReplyCtx(sessionKey string) (any, error) {
+	if p.failReconstruct {
+		return nil, errors.New("reconstruct unavailable")
+	}
+	parts := strings.SplitN(sessionKey, ":", 3)
+	if len(parts) < 2 || parts[0] != "slack" {
+		return nil, errors.New("invalid key")
+	}
+	rc := slackLikeCtx{channel: parts[1]}
+	if len(parts) == 3 && strings.HasPrefix(parts[2], "t:") {
+		rc.threadTS = strings.TrimPrefix(parts[2], "t:")
+	}
+	return rc, nil
+}
+
+func (p *slackLikePlatform) getSentCtx() []any {
+	p.ctxMu.Lock()
+	defer p.ctxMu.Unlock()
+	return append([]any(nil), p.sentCtx...)
+}
+
+func runOrphanTextTurn(t *testing.T, e *Engine, state *interactiveState, sess *orphanFakeSession, text string) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { e.orphanLoop(state, sess.orphanEvents); close(done) }()
+	sess.orphanEvents <- Event{Type: EventText, Content: text}
+	sess.orphanEvents <- Event{Type: EventResult, Done: true}
+	close(sess.orphanEvents)
+	<-done
+}
+
+// TestOrphanLoop_ChannelSessionPostsAtRootNotLastThread is the Kulcho
+// #product case (21 Oct 2026): with share_session_in_channel the session key
+// is slack:<channel>, the last user message was a thread reply, so the cached
+// replyCtx carries that thread's ts. A wakeup reply must go to the channel
+// root, not into that old thread.
+func TestOrphanLoop_ChannelSessionPostsAtRootNotLastThread(t *testing.T) {
+	plat := &slackLikePlatform{stubPlatformEngine: stubPlatformEngine{n: "slack"}}
+	sess := newOrphanFakeSession()
+	e, state := newOrphanTestEngine(t, plat, sess)
+	state.canonicalSessionKey = "slack:C0PRODUCT"
+	state.replyCtx = slackLikeCtx{channel: "C0PRODUCT", threadTS: "1792660000.000100"}
+
+	runOrphanTextTurn(t, e, state, sess, "morning check: all green")
+
+	got := plat.getSentCtx()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 post, got %d (%v)", len(got), got)
+	}
+	want := slackLikeCtx{channel: "C0PRODUCT"}
+	if got[0] != want {
+		t.Fatalf("wakeup posted with %+v, want channel root %+v (no thread_ts)", got[0], want)
+	}
+}
+
+// TestOrphanLoop_ThreadSessionStaysInThread: thread-scoped sessions keep
+// posting wakeups into their own thread.
+func TestOrphanLoop_ThreadSessionStaysInThread(t *testing.T) {
+	plat := &slackLikePlatform{stubPlatformEngine: stubPlatformEngine{n: "slack"}}
+	sess := newOrphanFakeSession()
+	e, state := newOrphanTestEngine(t, plat, sess)
+	state.canonicalSessionKey = "slack:C0PRODUCT:t:1792650000.000200"
+	state.replyCtx = slackLikeCtx{channel: "C0PRODUCT", threadTS: "1792650000.000200"}
+
+	runOrphanTextTurn(t, e, state, sess, "follow-up")
+
+	got := plat.getSentCtx()
+	want := slackLikeCtx{channel: "C0PRODUCT", threadTS: "1792650000.000200"}
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("thread-scoped wakeup posted with %v, want [%+v]", got, want)
+	}
+}
+
+// TestOrphanLoop_FallsBackToCachedCtxWhenReconstructFails: a platform that
+// cannot rebuild a context still gets the wakeup via the cached one.
+func TestOrphanLoop_FallsBackToCachedCtxWhenReconstructFails(t *testing.T) {
+	plat := &slackLikePlatform{stubPlatformEngine: stubPlatformEngine{n: "slack"}, failReconstruct: true}
+	sess := newOrphanFakeSession()
+	e, state := newOrphanTestEngine(t, plat, sess)
+	cached := slackLikeCtx{channel: "C1", threadTS: "1.2"}
+	state.canonicalSessionKey = "slack:C1"
+	state.replyCtx = cached
+
+	runOrphanTextTurn(t, e, state, sess, "still delivered")
+
+	got := plat.getSentCtx()
+	if len(got) != 1 || got[0] != cached {
+		t.Fatalf("expected fallback to cached ctx %+v, got %v", cached, got)
+	}
+}
+
+// TestSendToSession_IdleChannelSessionPostsAtRoot: an API/CLI send to an
+// idle channel-scoped session goes to the channel root, not the thread of
+// the last user message (same rule as wakeup turns).
+func TestSendToSession_IdleChannelSessionPostsAtRoot(t *testing.T) {
+	plat := &slackLikePlatform{stubPlatformEngine: stubPlatformEngine{n: "slack"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{plat}, "", LangEnglish)
+	e.interactiveStates["slack:C0PRODUCT"] = &interactiveState{
+		platform:            plat,
+		replyCtx:            slackLikeCtx{channel: "C0PRODUCT", threadTS: "1792660000.000100"},
+		canonicalSessionKey: "slack:C0PRODUCT",
+	}
+
+	if err := e.SendToSession("slack:C0PRODUCT", "hello from another session"); err != nil {
+		t.Fatalf("SendToSession: %v", err)
+	}
+	got := plat.getSentCtx()
+	want := slackLikeCtx{channel: "C0PRODUCT"}
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("idle send posted with %v, want [%+v]", got, want)
+	}
+
+	// The work-dir send path resolves its target the same way.
+	target, err := e.resolveSendTarget("slack:C0PRODUCT", false)
+	if err != nil {
+		t.Fatalf("resolveSendTarget: %v", err)
+	}
+	if target.replyCtx != want {
+		t.Fatalf("resolveSendTarget replyCtx = %+v, want %+v", target.replyCtx, want)
+	}
+}
+
+// TestSendToSession_DuringTurnKeepsThread: while a user turn is running the
+// agent is answering that message, so a `cc-connect send` from inside the
+// turn (e.g. attaching a file) must stay in the user's thread.
+func TestSendToSession_DuringTurnKeepsThread(t *testing.T) {
+	plat := &slackLikePlatform{stubPlatformEngine: stubPlatformEngine{n: "slack"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{plat}, "", LangEnglish)
+	cached := slackLikeCtx{channel: "C0PRODUCT", threadTS: "1792660000.000100"}
+	state := &interactiveState{
+		platform:            plat,
+		replyCtx:            cached,
+		canonicalSessionKey: "slack:C0PRODUCT",
+	}
+	e.interactiveStates["slack:C0PRODUCT"] = state
+	beginStateTurn(state)
+	defer endStateTurn(state)
+
+	if err := e.SendToSession("slack:C0PRODUCT", "here is the file"); err != nil {
+		t.Fatalf("SendToSession: %v", err)
+	}
+	got := plat.getSentCtx()
+	if len(got) != 1 || got[0] != cached {
+		t.Fatalf("in-turn send posted with %v, want [%+v]", got, cached)
 	}
 }
