@@ -3956,7 +3956,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		drainEvents(state.agentSession.Events())
 	}
 
-	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
+	promptContent := e.buildSenderPromptThread(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey, replyThreadID(p, msg.ReplyCtx))
 	if inj := e.getInjectPrompt(msg.SessionKey); inj != "" {
 		promptContent += "\n\n[keep in mind: " + inj + "]"
 	}
@@ -6597,7 +6597,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 
-				queuedPrompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
+				queuedPrompt := e.buildSenderPromptThread(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey, replyThreadID(queued.platform, queued.replyCtx))
 				if inj := e.getInjectPrompt(queued.msgSessionKey); inj != "" {
 					queuedPrompt += "\n\n[keep in mind: " + inj + "]"
 				}
@@ -6970,7 +6970,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		state.mu.Unlock()
 
 		e.i18n.DetectAndSet(queued.content)
-		prompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
+		prompt := e.buildSenderPromptThread(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey, replyThreadID(queued.platform, queued.replyCtx))
 		if inj := e.getInjectPrompt(queued.msgSessionKey); inj != "" {
 			prompt += "\n\n[keep in mind: " + inj + "]"
 		}
@@ -12129,6 +12129,9 @@ type SendOptions struct {
 	WorkDir string
 	AtUsers []string
 	AtAll   bool
+	// Target optionally names the thread / channel root to post to (fork,
+	// `cc-connect send --thread/--root`). Zero value keeps the old routing.
+	Target SendTarget
 }
 
 func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images []ImageAttachment, files []FileAttachment, atUsers []string, atAll bool) error {
@@ -12142,12 +12145,15 @@ func (e *Engine) SendToSessionWithOptions(sessionKey, message string, images []I
 			return err
 		}
 		if useWorkDirSession {
-			return e.SendToSessionInWorkDir(sessionKey, message, images, files, workDir, opts.AtUsers, opts.AtAll)
+			return e.sendToSessionInWorkDir(sessionKey, message, images, files, workDir, opts.AtUsers, opts.AtAll, opts.Target)
 		}
 	}
 
 	state, p, replyCtx, err := e.resolveOutboundSessionTarget(sessionKey, len(images) > 0 || len(files) > 0)
 	if err != nil {
+		return err
+	}
+	if replyCtx, err = applySendTarget(p, replyCtx, opts.Target); err != nil {
 		return err
 	}
 
@@ -12196,7 +12202,7 @@ func (e *Engine) SendToSessionWithOptions(sessionKey, message string, images []I
 				return err
 			}
 		}
-		if state != nil {
+		if state != nil && !opts.Target.IsSet() {
 			state.mu.Lock()
 			state.sideText = strings.TrimSpace(message)
 			state.mu.Unlock()
@@ -12229,6 +12235,10 @@ type sendTarget struct {
 }
 
 func (e *Engine) SendToSessionInWorkDir(sessionKey, message string, images []ImageAttachment, files []FileAttachment, workDir string, atUsers []string, atAll bool) error {
+	return e.sendToSessionInWorkDir(sessionKey, message, images, files, workDir, atUsers, atAll, SendTarget{})
+}
+
+func (e *Engine) sendToSessionInWorkDir(sessionKey, message string, images []ImageAttachment, files []FileAttachment, workDir string, atUsers []string, atAll bool, sendTarget SendTarget) error {
 	if message == "" && len(images) == 0 && len(files) == 0 {
 		return fmt.Errorf("message or attachment is required")
 	}
@@ -12242,6 +12252,9 @@ func (e *Engine) SendToSessionInWorkDir(sessionKey, message string, images []Ima
 	}
 	if target.platform == nil {
 		return fmt.Errorf("no active session found (key=%q)", sessionKey)
+	}
+	if target.replyCtx, err = applySendTarget(target.platform, target.replyCtx, sendTarget); err != nil {
+		return err
 	}
 
 	_, sessions, err := e.getOrCreateWorkspaceAgent(workDir)
@@ -12290,7 +12303,7 @@ func (e *Engine) SendToSessionInWorkDir(sessionKey, message string, images []Ima
 				return err
 			}
 		}
-		if target.state != nil {
+		if target.state != nil && !sendTarget.IsSet() {
 			target.state.mu.Lock()
 			target.state.sideText = strings.TrimSpace(message)
 			target.state.mu.Unlock()
@@ -12476,12 +12489,20 @@ func normalizeSendWorkDir(workDir, base string) (string, error) {
 // SendTTSToSession synthesizes and sends a voice message to an active session.
 // It is used by the local API/CLI so agents can call `cc-connect send --tts`.
 func (e *Engine) SendTTSToSession(sessionKey, text string) error {
+	return e.SendTTSToSessionTarget(sessionKey, text, SendTarget{})
+}
+
+// SendTTSToSessionTarget is SendTTSToSession with an explicit thread target.
+func (e *Engine) SendTTSToSessionTarget(sessionKey, text string, target SendTarget) error {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return fmt.Errorf("tts text is required")
 	}
 	_, p, replyCtx, err := e.resolveOutboundSessionTarget(sessionKey, false)
 	if err != nil {
+		return err
+	}
+	if replyCtx, err = applySendTarget(p, replyCtx, target); err != nil {
 		return err
 	}
 	return e.synthesizeAndSendTTS(p, replyCtx, text)
@@ -12493,11 +12514,19 @@ func (e *Engine) SendTTSToSession(sessionKey, text string) error {
 // `cc-connect send --audio`. Mirrors SendToSessionWithAttachments for
 // audio-typed clips so they don't get dispatched as generic files.
 func (e *Engine) SendAudiosToSession(sessionKey string, audios []FileAttachment) error {
+	return e.SendAudiosToSessionTarget(sessionKey, audios, SendTarget{})
+}
+
+// SendAudiosToSessionTarget is SendAudiosToSession with an explicit thread target.
+func (e *Engine) SendAudiosToSessionTarget(sessionKey string, audios []FileAttachment, target SendTarget) error {
 	if len(audios) == 0 {
 		return nil
 	}
 	_, p, replyCtx, err := e.resolveOutboundSessionTarget(sessionKey, true)
 	if err != nil {
+		return err
+	}
+	if replyCtx, err = applySendTarget(p, replyCtx, target); err != nil {
 		return err
 	}
 	if !e.attachmentSendEnabled {
@@ -12537,11 +12566,19 @@ func (e *Engine) SendAudiosToSession(sessionKey string, audios []FileAttachment)
 // platform's VideoSender (native video bubble) when supported, falling
 // back to FileSender otherwise. Used by `cc-connect send --video`.
 func (e *Engine) SendVideosToSession(sessionKey string, videos []FileAttachment) error {
+	return e.SendVideosToSessionTarget(sessionKey, videos, SendTarget{})
+}
+
+// SendVideosToSessionTarget is SendVideosToSession with an explicit thread target.
+func (e *Engine) SendVideosToSessionTarget(sessionKey string, videos []FileAttachment, target SendTarget) error {
 	if len(videos) == 0 {
 		return nil
 	}
 	_, p, replyCtx, err := e.resolveOutboundSessionTarget(sessionKey, true)
 	if err != nil {
+		return err
+	}
+	if replyCtx, err = applySendTarget(p, replyCtx, target); err != nil {
 		return err
 	}
 	if !e.attachmentSendEnabled {
@@ -17458,6 +17495,13 @@ func (e *Engine) cmdBindSetup(p Platform, msg *Message) {
 // it is included as sender_name so the agent can identify who sent the message
 // by display name (useful in shared channel sessions with multiple users).
 func (e *Engine) buildSenderPrompt(content, userID, userName, platform, sessionKey, channelKey string) string {
+	return e.buildSenderPromptThread(content, userID, userName, platform, sessionKey, channelKey, "")
+}
+
+// buildSenderPromptThread is buildSenderPrompt plus, when threadID is known,
+// a thread_ts=<id> attribute naming the thread this message's replies go to,
+// so the agent can target it with `cc-connect send --thread` (fork).
+func (e *Engine) buildSenderPromptThread(content, userID, userName, platform, sessionKey, channelKey, threadID string) string {
 	if !e.injectSender || userID == "" {
 		return content
 	}
@@ -17465,11 +17509,15 @@ func (e *Engine) buildSenderPrompt(content, userID, userName, platform, sessionK
 	if chatID == "" {
 		chatID = extractChannelID(sessionKey)
 	}
+	threadAttr := ""
+	if threadID != "" && !strings.ContainsAny(threadID, " ]\n\r\"") {
+		threadAttr = " thread_ts=" + threadID
+	}
 	if userName != "" {
 		safeName := strings.NewReplacer(`"`, `'`, "\n", " ", "\r", "").Replace(userName)
-		return fmt.Sprintf("[cc-connect sender_id=%s sender_name=\"%s\" platform=%s chat_id=%s]\n%s", userID, safeName, platform, chatID, content)
+		return fmt.Sprintf("[cc-connect sender_id=%s sender_name=\"%s\" platform=%s chat_id=%s%s]\n%s", userID, safeName, platform, chatID, threadAttr, content)
 	}
-	return fmt.Sprintf("[cc-connect sender_id=%s platform=%s chat_id=%s]\n%s", userID, platform, chatID, content)
+	return fmt.Sprintf("[cc-connect sender_id=%s platform=%s chat_id=%s%s]\n%s", userID, platform, chatID, threadAttr, content)
 }
 
 func extractChannelID(sessionKey string) string {

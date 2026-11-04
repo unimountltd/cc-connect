@@ -63,6 +63,10 @@ func runSend(args []string) {
 		os.Exit(1)
 	}
 
+	if req.DryRun {
+		fmt.Printf("Dry run, nothing posted. Would post to: %s\n", strings.TrimSpace(string(body)))
+		return
+	}
 	fmt.Println("Message sent successfully.")
 }
 
@@ -156,6 +160,25 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 			}
 		case "--at-all":
 			req.AtAll = true
+		case "--thread", "-t":
+			if i+1 >= len(args) {
+				return req, "", fmt.Errorf("--thread requires a thread ts")
+			}
+			i++
+			req.Thread = strings.TrimSpace(args[i])
+			if req.Thread == "" {
+				return req, "", fmt.Errorf("--thread requires a thread ts")
+			}
+		case "--channel":
+			if i+1 >= len(args) {
+				return req, "", fmt.Errorf("--channel requires a channel id")
+			}
+			i++
+			req.Channel = strings.TrimSpace(args[i])
+		case "--root":
+			req.Root = true
+		case "--dry-run":
+			req.DryRun = true
 		case "--data-dir":
 			if i+1 >= len(args) {
 				return req, "", fmt.Errorf("--data-dir requires a value")
@@ -216,7 +239,14 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 	req.Audios = audioFiles
 	req.Videos = videoFiles
 
-	if req.Message == "" && req.TTSText == "" && len(req.Images) == 0 && len(req.Files) == 0 &&
+	if err := (core.SendTarget{Channel: req.Channel, Thread: req.Thread, Root: req.Root}).Validate(); err != nil {
+		return req, "", err
+	}
+	if req.SessionCmd != "" && (req.Thread != "" || req.Root || req.Channel != "") {
+		return req, "", fmt.Errorf("--session-cmd cannot be combined with --thread/--channel/--root")
+	}
+
+	if !req.DryRun && req.Message == "" && req.TTSText == "" && len(req.Images) == 0 && len(req.Files) == 0 &&
 		len(req.Audios) == 0 && len(req.Videos) == 0 && req.SessionCmd == "" {
 		return req, "", fmt.Errorf("message, tts text, session command, or attachment is required")
 	}
@@ -391,6 +421,13 @@ Options:
       --stdin              Read message from stdin (best for long/special-char messages)
       --at-users <ids>     @ user IDs, comma-separated (DingTalk)
       --at-all             @ everyone (DingTalk)
+  -t, --thread <ts>        Post into this thread (Slack: the thread's root ts,
+                           shown as thread_ts=... in the message header)
+      --root               Post at the channel root, not in any thread
+      --channel <id>       Post to another channel (needs --thread or --root)
+      --dry-run            Show the channel/thread the send would use; post nothing
+                           Without --thread/--root the post goes where the session
+                           is currently replying (the thread of the current turn).
   -p, --project <name>     Target project (optional if only one project)
   -s, --session <key>      Target session key (optional, picks first active)
       --data-dir <path>    Data directory (default: ~/.cc-connect)
@@ -401,6 +438,9 @@ Examples:
   cc-connect send -m "Build completed successfully"
   cc-connect send --message "Chart generated" --image /tmp/chart.png
   cc-connect send --file /tmp/report.pdf
+  cc-connect send --thread 1730716000.123456 -m "Driver result for this thread"
+  cc-connect send --root -m "Scheduled check-in"
+  cc-connect send --thread 1730716000.123456 --dry-run
   cc-connect send --session-cmd /new --message "Work on issue #42"
   cc-connect send --video /tmp/demo.mp4
   cc-connect send --audio /tmp/voice.opus

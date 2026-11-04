@@ -61,6 +61,16 @@ type SendRequest struct {
 	Videos     []FileAttachment  `json:"videos,omitempty"`
 	AtUsers    []string          `json:"at_users,omitempty"`
 	AtAll      bool              `json:"at_all,omitempty"`
+	// Fork: explicit post target (`cc-connect send --thread/--channel/--root`)
+	// and a dry run that reports the resolved target without posting.
+	Channel string `json:"channel,omitempty"`
+	Thread  string `json:"thread,omitempty"`
+	Root    bool   `json:"root,omitempty"`
+	DryRun  bool   `json:"dry_run,omitempty"`
+}
+
+func (r SendRequest) target() SendTarget {
+	return SendTarget{Channel: strings.TrimSpace(r.Channel), Thread: strings.TrimSpace(r.Thread), Root: r.Root}
 }
 
 // NewAPIServer creates an API server on a Unix socket.
@@ -226,7 +236,12 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if req.Message == "" && strings.TrimSpace(req.TTSText) == "" && len(req.Images) == 0 &&
+	target := req.target()
+	if err := target.Validate(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !req.DryRun && req.Message == "" && strings.TrimSpace(req.TTSText) == "" && len(req.Images) == 0 &&
 		len(req.Files) == 0 && len(req.Audios) == 0 && len(req.Videos) == 0 && req.SessionCmd == "" {
 		http.Error(w, "message, tts_text, session_cmd, or attachment is required", http.StatusBadRequest)
 		return
@@ -258,6 +273,21 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.DryRun {
+		preview, err := engine.PreviewSendTarget(req.SessionKey, target)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		apiJSON(w, http.StatusOK, preview)
+		return
+	}
+
+	if req.SessionCmd != "" && target.IsSet() {
+		http.Error(w, "--session-cmd cannot be combined with --thread/--channel/--root", http.StatusBadRequest)
+		return
+	}
+
 	if req.SessionCmd != "" {
 		if req.Message != "" {
 			if len(req.Images) > 0 || len(req.Files) > 0 {
@@ -284,28 +314,28 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		workDir = req.CWD
 	}
 	if req.Message != "" || len(req.Images) > 0 || len(req.Files) > 0 {
-		if err := engine.SendToSessionWithOptions(req.SessionKey, req.Message, req.Images, req.Files, SendOptions{WorkDir: workDir, AtUsers: req.AtUsers, AtAll: req.AtAll}); err != nil {
+		if err := engine.SendToSessionWithOptions(req.SessionKey, req.Message, req.Images, req.Files, SendOptions{WorkDir: workDir, AtUsers: req.AtUsers, AtAll: req.AtAll, Target: target}); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 	}
 
 	if len(req.Audios) > 0 {
-		if err := engine.SendAudiosToSession(req.SessionKey, req.Audios); err != nil {
+		if err := engine.SendAudiosToSessionTarget(req.SessionKey, req.Audios, target); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 	}
 
 	if len(req.Videos) > 0 {
-		if err := engine.SendVideosToSession(req.SessionKey, req.Videos); err != nil {
+		if err := engine.SendVideosToSessionTarget(req.SessionKey, req.Videos, target); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 	}
 
 	if strings.TrimSpace(req.TTSText) != "" {
-		if err := engine.SendTTSToSession(req.SessionKey, req.TTSText); err != nil {
+		if err := engine.SendTTSToSessionTarget(req.SessionKey, req.TTSText, target); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -668,6 +669,48 @@ func (p *Platform) downloadSlackFile(url string) ([]byte, error) {
 	}
 
 	return data, nil
+}
+
+var (
+	slackThreadTSRe = regexp.MustCompile(`^[0-9]{9,11}\.[0-9]{1,6}$`)
+	slackChannelRe  = regexp.MustCompile(`^[CDG][A-Z0-9]{2,}$`)
+)
+
+// OverrideReplyTarget implements core.ReplyTargetOverrider (fork): aim a
+// reply context at an explicit channel and thread ts, or the channel root.
+func (p *Platform) OverrideReplyTarget(rctx any, channel, thread string, root bool) (any, error) {
+	rc, _ := rctx.(replyContext)
+	if channel != "" {
+		if !slackChannelRe.MatchString(channel) {
+			return nil, fmt.Errorf("slack: invalid channel id %q (want e.g. C0123ABCD)", channel)
+		}
+		if channel != rc.channel {
+			rc.messageTS = ""
+		}
+		rc.channel = channel
+	}
+	if rc.channel == "" {
+		return nil, fmt.Errorf("slack: no channel to post to; pass --channel")
+	}
+	switch {
+	case root:
+		rc.timestamp = ""
+	case thread != "":
+		if !slackThreadTSRe.MatchString(thread) {
+			return nil, fmt.Errorf("slack: invalid thread ts %q (want e.g. 1730716000.123456)", thread)
+		}
+		rc.timestamp = thread
+	}
+	return rc, nil
+}
+
+// DescribeReplyTarget implements core.ReplyTargetDescriber (fork).
+func (p *Platform) DescribeReplyTarget(rctx any) (string, string, bool) {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return "", "", false
+	}
+	return rc.channel, rc.timestamp, true
 }
 
 func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
