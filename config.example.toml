@@ -360,6 +360,13 @@ level = "info" # debug, info, warn, error
 # max_tokens = 12000     # estimated token threshold to trigger compression
 # min_gap_mins = 30      # minimum minutes between auto-compress runs (default 30)
 
+# Quiet session housekeeping: when true, auto_compress and reset_on_idle_mins
+# run without posting "Compressing context..." / "Session auto-reset..." notices
+# in the chat; they are logged instead. Manual /compress and /new still reply.
+# Default false. Set per [[projects]] entry.
+# [[projects]]
+# quiet_session_notices = true
+
 # [projects.observe]
 # enabled = true                    # Forward native terminal sessions to Slack
 # channel = "C0AL13PN4BG"           # Slack channel ID to post observations to

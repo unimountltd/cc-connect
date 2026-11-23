@@ -589,6 +589,11 @@ type ProjectConfig struct {
 	// the current session has been inactive for the specified number of minutes.
 	// 0 or nil disables the behavior.
 	ResetOnIdleMins *int `toml:"reset_on_idle_mins,omitempty"`
+	// QuietSessionNotices, when true, stops automatic session housekeeping
+	// (auto_compress and reset_on_idle_mins) from posting notices in the chat;
+	// it is logged instead. Manual /compress and /new replies are unchanged.
+	// Default false keeps upstream behaviour.
+	QuietSessionNotices *bool `toml:"quiet_session_notices,omitempty"`
 	// AgentSessionIdleTimeoutMins 在指定分钟数后关闭空闲的 live agent 进程，
 	// 同时保留已保存的 session ID，便于下一条消息继续恢复。0 或 nil 表示禁用。
 	AgentSessionIdleTimeoutMins *int `toml:"agent_session_idle_timeout_mins,omitempty"`

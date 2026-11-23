@@ -434,6 +434,9 @@ type Engine struct {
 	autoCompressMaxTokens int
 	autoCompressMinGap    time.Duration
 	resetOnIdle           time.Duration
+	// quietSessionNotices suppresses chat notices for automatic compress and
+	// idle reset (logged instead). Manual /compress and /new are unaffected.
+	quietSessionNotices bool
 
 	// Reply footer composition flags. The footer renders up to two lines:
 	//   line 1 — model · [effort ·] out/in/cw/cr · ctx%   (gated by showContextIndicator)
@@ -987,6 +990,13 @@ func (e *Engine) SetResetOnIdle(d time.Duration) {
 		return
 	}
 	e.resetOnIdle = d
+}
+
+// SetQuietSessionNotices makes auto-compress and idle auto-reset run without
+// posting notices to the chat (they are logged instead). Manual /compress and
+// /new keep their replies.
+func (e *Engine) SetQuietSessionNotices(quiet bool) {
+	e.quietSessionNotices = quiet
 }
 
 // SetAgentSessionIdleTimeout 配置单轮正常结束后的 live agent 空闲关闭时间。
@@ -3272,7 +3282,7 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 	hasAgent := hasState && state != nil && state.agentSession != nil && state.agentSession.Alive()
 	e.interactiveMu.Unlock()
 
-	if hasAgent {
+	if hasAgent && !e.quietSessionNotices {
 		// Notify the user before the potentially long close. The close
 		// returns as soon as the process exits (usually seconds), but
 		// Stop hooks can take up to 120s.
@@ -3288,7 +3298,16 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 		return nil
 	}
 
-	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgSessionAutoResetIdle, int(e.resetOnIdle/time.Minute)))
+	if e.quietSessionNotices {
+		slog.Info("idle auto-reset: notice suppressed (quiet_session_notices)",
+			"session_key", msg.SessionKey,
+			"old_session", session.ID,
+			"new_session", newSession.ID,
+			"threshold_mins", int(e.resetOnIdle/time.Minute),
+		)
+	} else {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgSessionAutoResetIdle, int(e.resetOnIdle/time.Minute)))
+	}
 	return newSession
 }
 
@@ -6577,7 +6596,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					if tokenEst > 0 {
 						compressNotice = fmt.Sprintf("%s (~%dk tokens)", compressNotice, tokenEst/1000)
 					}
-					e.send(state.platform, state.replyCtx, compressNotice)
+					if e.quietSessionNotices {
+						slog.Info("auto-compress: notice suppressed (quiet_session_notices)", "session", sessionKey, "token_estimate", tokenEst)
+					} else {
+						e.send(state.platform, state.replyCtx, compressNotice)
+					}
 
 					// Run compress inline while the session is still locked.
 					e.runCompress(state, session, sessions, sessionKey, state.platform, state.replyCtx, true)

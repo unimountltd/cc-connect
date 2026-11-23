@@ -3474,3 +3474,21 @@ func TestRemoveGlobalProvider_CleansUpProviderRefs(t *testing.T) {
 		t.Errorf("proj2 provider_refs: want [], got %v", refs2)
 	}
 }
+
+func TestLoad_ParsesQuietSessionNotices(t *testing.T) {
+	cfg, err := Load(writeConfigFixture(t, projectWithResetOnIdleFixture))
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Projects[0].QuietSessionNotices != nil {
+		t.Fatal("quiet_session_notices should default to nil (off)")
+	}
+	fixture := strings.Replace(projectWithResetOnIdleFixture, "reset_on_idle_mins = 60\n", "reset_on_idle_mins = 60\nquiet_session_notices = true\n", 1)
+	cfg, err = Load(writeConfigFixture(t, fixture))
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if q := cfg.Projects[0].QuietSessionNotices; q == nil || !*q {
+		t.Fatalf("quiet_session_notices = %v, want true", q)
+	}
+}

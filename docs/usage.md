@@ -64,6 +64,8 @@ The next normal message after a long idle period starts in a fresh session autom
 
 To restore the previous behavior of always continuing, set `reset_on_idle_mins = 0`.
 
+Automatic housekeeping (idle reset and `[projects.auto_compress]`) posts a short notice in the chat by default. To run it silently and only log it, set `quiet_session_notices = true` on the project. Manual `/compress` and `/new` still reply as usual.
+
 ### Model switch preserves history
 
 `/model` preserves the current session — the agent resumes the conversation with the new model (no extra token cost). Model switching affects the shared agent instance — if multiple platforms use the same project, the model change applies to all of them.
