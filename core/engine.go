@@ -563,6 +563,8 @@ type interactiveState struct {
 	pendingMessages          []queuedMessage // messages queued while session was busy
 	approveAll               bool            // when true, auto-approve all permission requests for this session
 	fromVoice                bool            // true if current turn originated from voice transcription
+	turnFromCron             bool            // current turn was injected by a cron job; consumed by processInteractiveEvents
+	turnHideProgress         bool            // current turn hides thinking/tool previews; consumed by processInteractiveEvents
 	sideText                 string
 	deleteMode               *deleteModeState
 	modelSwitch              *modelSwitchState
@@ -1627,6 +1629,8 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		Content:      content,
 		ReplyCtx:     replyCtx,
 		ModeOverride: job.Mode,
+		FromCron:     true,
+		HideProgress: job.HideProgress,
 	}
 
 	// Resolve workspace-specific agent and sessions for multi-workspace mode.
@@ -3983,6 +3987,8 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		state.currentMessageID = msg.MessageID
 		state.fromVoice = msg.FromVoice
 		state.sideText = ""
+		state.turnFromCron = msg.FromCron
+		state.turnHideProgress = msg.HideProgress
 		as := state.agentSession // capture under lock to avoid race with cleanup
 		state.mu.Unlock()
 
@@ -5303,6 +5309,17 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		state.mu.Unlock()
 	}
 
+	// Per-turn display overrides (cron jobs with hide_progress). Consumed here
+	// so a queued follow-up turn on the same state never inherits them.
+	state.mu.Lock()
+	turnFromCron := state.turnFromCron
+	turnHideProgress := state.turnHideProgress
+	state.turnFromCron = false
+	state.turnHideProgress = false
+	state.mu.Unlock()
+	showThinking := e.display.ThinkingMessages && !turnHideProgress
+	showTools := e.display.ToolMessages && !turnHideProgress
+
 	var textParts []string
 	var segmentStart int // index into textParts: text before this has been sent/displayed
 	silentHold := false  // true while accumulated segment text could still resolve to a bare NO_REPLY marker
@@ -5626,7 +5643,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 			if hasRichCard {
 				// When thinking messages are suppressed, skip card creation.
-				if !e.display.ThinkingMessages {
+				if !showThinking {
 					break
 				}
 				if thinking := strings.TrimSpace(truncateIf(event.Content, e.display.ThinkingMaxLen)); thinking != "" {
@@ -5658,7 +5675,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// When thinking messages are hidden, behavior depends on display mode:
 			//   quiet:   append separator to keep all text in one card
 			//   compact: freeze+detach to split text into separate cards
-			if !e.display.ThinkingMessages && len(textParts) > segmentStart {
+			if !showThinking && len(textParts) > segmentStart {
 				if e.display.Mode == "quiet" {
 					if sp.canPreview() && sp.appendSeparator("\n\n") {
 						textParts = append(textParts, "\n\n")
@@ -5679,7 +5696,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				silentHold = false
 			}
-			if e.display.ThinkingMessages && event.Content != "" {
+			if showThinking && event.Content != "" {
 				// --- StreamingCard path ---
 				if streamCard != nil && !streamCard.Failed() {
 					cardThinkingText = truncateIf(event.Content, e.display.ThinkingMaxLen)
@@ -5719,7 +5736,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 			if hasRichCard {
 				// When tool messages are suppressed, skip card updates on tool events.
-				if !e.display.ToolMessages {
+				if !showTools {
 					break
 				}
 				toolSteps = append(toolSteps, ToolStep{
@@ -5748,7 +5765,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// When tool messages are hidden, behavior depends on display mode:
 			//   quiet:   append separator to keep all text in one card
 			//   compact: freeze+detach to split text into separate cards
-			if !e.display.ToolMessages && len(textParts) > segmentStart {
+			if !showTools && len(textParts) > segmentStart {
 				if e.display.Mode == "quiet" {
 					if sp.canPreview() && sp.appendSeparator("\n\n") {
 						textParts = append(textParts, "\n\n")
@@ -5769,7 +5786,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				silentHold = false
 			}
-			if e.display.ToolMessages {
+			if showTools {
 				// --- StreamingCard path ---
 				if streamCard != nil && !streamCard.Failed() {
 					toolInput := event.ToolInput
@@ -5846,7 +5863,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventToolResult:
-			if e.display.ToolMessages {
+			if showTools {
 				result := strings.TrimSpace(event.ToolResult)
 				if result == "" {
 					result = strings.TrimSpace(event.Content)
@@ -6202,7 +6219,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// When tool progress is hidden, segmentStart stays 0 and textParts
 			// contains ALL text across tool boundaries. Prefer the full accumulated
 			// text over event.Content which only contains the last assistant segment.
-			if len(textParts) > 0 && segmentStart == 0 && !e.display.ToolMessages {
+			if len(textParts) > 0 && segmentStart == 0 && !showTools {
 				fullResponse = strings.Join(textParts, "")
 			} else if fullResponse == "" && len(textParts) > 0 {
 				fullResponse = strings.Join(textParts, "")
@@ -6370,15 +6387,30 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if isSilent {
 					cardBody = strings.TrimRight(cardAnswerText.String(), " \t\r\n")
 				}
-				finalContent := buildCardContent(cardThinkingText, cardToolCalls, cardBody)
-				if err := streamCard.Finalize(e.ctx, finalContent); err != nil {
-					slog.Error("streaming card finalize failed, sending fallback", "error", err)
-					// Fallback: send the response as a normal message — but never
-					// for a silent reply, which has no deliverable content.
-					if !isSilent {
-						for _, chunk := range SplitMessageCodeFenceAware(fullResponse, maxPlatformMessageLen) {
-							if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
-								return
+				// A cron run that resolves to a bare NO_REPLY must not leave a
+				// progress-only card (e.g. just "💭 Thinking") behind: remove it.
+				discarded := false
+				if isSilent && turnFromCron && cardBody == "" {
+					if d, ok := streamCard.(StreamingCardDiscarder); ok {
+						if err := d.Discard(e.ctx); err != nil {
+							slog.Warn("silent cron reply: failed to remove progress card", "session", session.ID, "error", err)
+						} else {
+							discarded = true
+							slog.Info("silent cron reply: progress card removed", "session", session.ID)
+						}
+					}
+				}
+				if !discarded {
+					finalContent := buildCardContent(cardThinkingText, cardToolCalls, cardBody)
+					if err := streamCard.Finalize(e.ctx, finalContent); err != nil {
+						slog.Error("streaming card finalize failed, sending fallback", "error", err)
+						// Fallback: send the response as a normal message — but never
+						// for a silent reply, which has no deliverable content.
+						if !isSilent {
+							for _, chunk := range SplitMessageCodeFenceAware(fullResponse, maxPlatformMessageLen) {
+								if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
+									return
+								}
 							}
 						}
 					}
@@ -6391,6 +6423,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// sp.discard() clears previewMsgID so sp.needsDoneReaction() also returns false,
 				// preventing a stray done_emoji push.
 				sp.discard()
+				// Cron run: also remove a progress-only compact message.
+				if turnFromCron {
+					cp.Discard()
+				}
 				// Rich mode: cardMessageID is tracked independently of sp.previewMsgID,
 				// so sp.discard() doesn't reach it. Without explicit handling the rich
 				// card would stay frozen in "Working" / "Thinking" header state forever
@@ -6652,6 +6688,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				sp = newStreamPreview(e.streamPreview, queued.platform, queued.replyCtx, e.ctx, queuedRenderer)
 				cp = newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), queuedRenderer, workspaceDir, e.getInjectPrompt(queued.msgSessionKey))
+
+				// Queued follow-ups are user messages: drop cron per-turn overrides.
+				turnFromCron = false
+				showThinking = e.display.ThinkingMessages
+				showTools = e.display.ToolMessages
 
 				// Reset streaming card state for the next turn
 				streamCard = nil

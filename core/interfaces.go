@@ -711,6 +711,14 @@ type StreamingCard interface {
 	Failed() bool
 }
 
+// StreamingCardDiscarder is an optional StreamingCard extension that deletes
+// the card message if one was already posted (no-op otherwise). The engine
+// uses it when a cron turn resolves to a bare NO_REPLY so no progress-only
+// placeholder is left in the channel.
+type StreamingCardDiscarder interface {
+	Discard(ctx context.Context) error
+}
+
 // StreamingCardPlatform is an optional interface for platforms that support
 // aggregating an entire agent turn into a single updatable card message
 // (e.g. DingTalk AI Card). When the engine detects this interface, it

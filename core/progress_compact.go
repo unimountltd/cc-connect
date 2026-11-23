@@ -686,6 +686,32 @@ func usageIndicatorCompact(totalInput, outputTokens, contextTokens, contextWindo
 	return "[" + strings.Join(parts, " · ") + "]"
 }
 
+// Discard deletes the progress message posted by SendPreviewStart, when the
+// platform supports PreviewCleaner. Returns true when a message was removed.
+// Used for silent (NO_REPLY) cron turns so no progress-only post is left.
+func (w *compactProgressWriter) Discard() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.stopTickerLocked()
+	if !w.enabled || w.handle == nil || w.starter == nil {
+		return false
+	}
+	cleaner, ok := w.platform.(PreviewCleaner)
+	if !ok {
+		return false
+	}
+	callCtx, cancel := w.withAPITimeout()
+	err := cleaner.DeletePreviewMessage(callCtx, w.handle)
+	cancel()
+	if err != nil {
+		slog.Warn("progress writer: Discard failed", "platform", w.platform.Name(), "error", err)
+		return false
+	}
+	w.handle = nil
+	w.lastSent = ""
+	return true
+}
+
 // Finalize updates card progress state (running/completed/failed) without
 // appending a new progress entry.
 func (w *compactProgressWriter) Finalize(state ProgressCardState) bool {

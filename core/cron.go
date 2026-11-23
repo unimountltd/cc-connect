@@ -38,6 +38,10 @@ type CronJob struct {
 	CreatedAt   time.Time `json:"created_at"`
 	LastRun     time.Time `json:"last_run,omitempty"`
 	LastError   string    `json:"last_error,omitempty"`
+
+	// HideProgress suppresses thinking/tool progress previews for turns started
+	// by this job: only the final answer is posted (nothing at all for NO_REPLY).
+	HideProgress bool `json:"hide_progress,omitempty"`
 }
 
 // IsShellJob returns true if the job runs a shell command directly.

@@ -444,6 +444,11 @@ type Message struct {
 	// drop late redeliveries that reuse a new message_id but an older create_time
 	// than a message already processed. Zero means unset (no ordering hint).
 	UserMessageTimeMs int64
+	// FromCron marks a synthetic message injected by a cron job run.
+	FromCron bool
+	// HideProgress suppresses thinking/tool progress previews for this turn
+	// (set from CronJob.HideProgress); only the final answer is delivered.
+	HideProgress bool
 }
 
 // EventType distinguishes different kinds of agent output.

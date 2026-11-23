@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -157,6 +158,23 @@ func (c *slackStreamingCard) Finalize(ctx context.Context, content string) error
 	return nil
 }
 
+// Discard deletes the card message if it was already posted (no-op when the
+// lazy card was never posted). Implements core.StreamingCardDiscarder; the
+// bot can always delete its own messages with chat:write.
+func (c *slackStreamingCard) Discard(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ts == "" {
+		return nil
+	}
+	if _, _, err := c.client.DeleteMessageContext(ctx, c.channel, c.ts); err != nil && !strings.Contains(err.Error(), "message_not_found") {
+		return fmt.Errorf("slack: discard streaming card: %w", err)
+	}
+	c.ts = ""
+	c.lastSent = ""
+	return nil
+}
+
 // Failed reports whether the card has entered a terminal failed state.
 func (c *slackStreamingCard) Failed() bool {
 	c.mu.Lock()
@@ -164,4 +182,7 @@ func (c *slackStreamingCard) Failed() bool {
 	return c.failed
 }
 
-var _ core.StreamingCardPlatform = (*Platform)(nil)
+var (
+	_ core.StreamingCardPlatform  = (*Platform)(nil)
+	_ core.StreamingCardDiscarder = (*slackStreamingCard)(nil)
+)
